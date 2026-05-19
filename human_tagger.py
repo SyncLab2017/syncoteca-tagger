@@ -453,9 +453,8 @@ with right:
 
     with tab_e:
         pills_group("🕰️ Эпоха / Decade", DECADES, ERA_KEY)
-        tempo_tags = _d("Tempo")
-        if tempo_tags:
-            pills_group("⏱️ Темп / Tempo", _by_ru(tempo_tags), TEMPO_KEY)
+        tempo_tags = _by_ru(_d("Tempo") + [{"ru": "Переменчивый", "en": "Variable tempo"}])
+        pills_group("⏱️ Темп / Tempo", tempo_tags, TEMPO_KEY)
 
     with tab_v:
         pills_group("🎤 Вокал / Vocals", VOCAL_TAGS, VOC_KEY)
