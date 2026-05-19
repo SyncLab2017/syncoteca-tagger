@@ -195,7 +195,8 @@ INSTR_TAGS = _by_ru([
 # ТЕМЫ ТЕКСТА — все теги отсортированы по RU и делятся на 3 колонки
 _theme_all = _by_ru(
     _d("Lyric themes") + _d("Lyric themes / Adventure") +
-    _d("Lyric themes / Ambition") + _d("Lyric themes / Love")
+    _d("Lyric themes / Ambition") + _d("Lyric themes / Love") +
+    [{"ru": "Мат / Ненормативная лексика", "en": "Explicit / Profanity"}]
 )
 # Дедупликация по (ru, en)
 _seen: set = set()
