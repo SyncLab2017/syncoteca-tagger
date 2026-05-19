@@ -79,6 +79,7 @@ def _d(cat: str) -> list[dict]:
 # ЖАНР — 4 семейства
 GENRE_GROUPS = {
     "🎸 Рок / Метал / Панк": _by_ru([
+        {"ru": "Альтернатива", "en": "Alternative"},
         {"ru": "Инди", "en": "Indie"},
         {"ru": "Метал", "en": "Metal"},
         {"ru": "Панк", "en": "Punk"},
@@ -86,22 +87,27 @@ GENRE_GROUPS = {
     ]),
     "🎤 Поп / Электронная / Хип-хоп": _by_ru([
         {"ru": "Дэнс", "en": "Dance"},
-        {"ru": "Электронная", "en": "Electronic"},
+        {"ru": "Поп", "en": "Pop"},
+        {"ru": "Поп-рок", "en": "Pop-Rock"},
         {"ru": "Фанк", "en": "Funk"},
         {"ru": "Хип-хоп / Рэп", "en": "Hip-hop / Rap"},
-        {"ru": "Поп", "en": "Pop"},
+        {"ru": "Электронная", "en": "Electronic"},
         {"ru": "R&B", "en": "R&B"},
     ]),
     "🎷 Классика / Джаз / Соул": _by_ru([
         {"ru": "Амбиент", "en": "Ambient"},
         {"ru": "Блюз", "en": "Blues"},
+        {"ru": "Госпел", "en": "Gospel"},
         {"ru": "Джаз", "en": "Jazz"},
         {"ru": "Классика", "en": "Classical"},
+        {"ru": "Нью-эйдж / Медитация", "en": "New Age / Meditation"},
         {"ru": "Регги", "en": "Reggae"},
         {"ru": "Соул", "en": "Soul"},
     ]),
     "🌍 Мировая / Русская / Ретро": _by_ru([
         {"ru": "Авторская песня", "en": "Singer-songwriter"},
+        {"ru": "Детская", "en": "Children's"},
+        {"ru": "Диско", "en": "Disco"},
         {"ru": "Кантри", "en": "Country"},
         {"ru": "Латин", "en": "Latin"},
         {"ru": "Мировая музыка", "en": "World"},
