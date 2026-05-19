@@ -10,18 +10,16 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
-# ─── Supabase client (optional) ───────────────────────────────────────────────
+# ─── Supabase client ──────────────────────────────────────────────────────────
 @st.cache_resource
 def _supabase_client():
-    try:
-        from supabase import create_client
-        url = st.secrets.get("SUPABASE_URL") or os.environ.get("SUPABASE_URL", "")
-        key = st.secrets.get("SUPABASE_KEY") or os.environ.get("SUPABASE_KEY", "")
-        if url and key:
-            return create_client(url, key)
-    except Exception:
-        pass
-    return None
+    from supabase import create_client
+    url = st.secrets.get("SUPABASE_URL") or os.environ.get("SUPABASE_URL", "")
+    key = st.secrets.get("SUPABASE_KEY") or os.environ.get("SUPABASE_KEY", "")
+    if not url or not key:
+        st.error("⚠️ SUPABASE_URL / SUPABASE_KEY не настроены в Streamlit Secrets. Теги не сохраняются!")
+        st.stop()
+    return create_client(url, key)
 
 st.set_page_config(page_title="Tagger — Синкотека", page_icon="🎵", layout="wide")
 st.markdown("""
