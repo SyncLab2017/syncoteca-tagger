@@ -1,0 +1,9 @@
+venv/
+venv_new/
+__pycache__/
+*.pyc
+.env
+human_tags.csv
+.streamlit/secrets.toml
+*.egg-info/
+.DS_Store
