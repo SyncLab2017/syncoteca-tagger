@@ -327,10 +327,6 @@ st.progress(pct, text=f"🎵 {employee}  ·  {today_str}  ·  сегодня: {t
 
 if today_done >= DAILY_BATCH_SIZE:
     st.success(f"✅ Все {DAILY_BATCH_SIZE} треков на сегодня готовы! Возвращайся завтра.")
-    df_my = load_tags()
-    if not df_my.empty:
-        df_my = df_my[df_my["employee"] == employee]
-        st.download_button("⬇️ Скачать мои теги", df_my.to_csv(index=False).encode(), f"tags_{employee}.csv", "text/csv")
     st.stop()
 
 # ── Track ─
@@ -469,9 +465,18 @@ with right:
 
 # ── Stats ─
 with st.expander("📊 Мой прогресс"):
-    df_my = load_tags()
-    if not df_my.empty:
-        df_my = df_my[df_my["employee"] == employee]
-        st.write(f"Всего размечено: **{len(df_my)}** треков")
-        st.download_button("⬇️ Скачать CSV", df_my.to_csv(index=False).encode(),
-                           f"tags_{employee}.csv", "text/csv")
+    sb = _supabase_client()
+    if sb:
+        res = sb.table("human_tags").select("track_id,title,artist,tagged_at").eq("employee", employee).execute()
+        if res.data:
+            df_my = pd.DataFrame(res.data)
+            st.write(f"Всего размечено: **{len(df_my)}** треков")
+            st.dataframe(df_my[["title","artist","tagged_at"]], use_container_width=True)
+    else:
+        csv_path = BASE / "human_tags.csv"
+        if csv_path.exists():
+            df_my = pd.read_csv(csv_path)
+            df_my = df_my[df_my["employee"] == employee]
+            st.write(f"Всего размечено: **{len(df_my)}** треков")
+            st.download_button("⬇️ Скачать CSV", df_my.to_csv(index=False).encode(),
+                               f"tags_{employee}.csv", "text/csv")
