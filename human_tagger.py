@@ -207,10 +207,13 @@ _theme_all = _by_ru(
     [{"ru": "Мат / Ненормативная лексика", "en": "Explicit / Profanity"},
      {"ru": "Новый год", "en": "New Year"}]
 )
-# Дедупликация по (ru, en)
+# Дедупликация по (ru, en) + исключения
+_THEME_EXCLUDE_EN = {"Attachment"}
 _seen: set = set()
 _theme_dedup: list[dict] = []
 for t in _theme_all:
+    if t["en"] in _THEME_EXCLUDE_EN:
+        continue
     k = (t["ru"], t["en"])
     if k not in _seen:
         _seen.add(k)
