@@ -205,7 +205,8 @@ _theme_all = _by_ru(
     _d("Lyric themes") + _d("Lyric themes / Adventure") +
     _d("Lyric themes / Ambition") + _d("Lyric themes / Love") +
     [{"ru": "Мат / Ненормативная лексика", "en": "Explicit / Profanity"},
-     {"ru": "Новый год", "en": "New Year"}]
+     {"ru": "Новый год", "en": "New Year"},
+     {"ru": "Ссора", "en": "Quarrel"}]
 )
 # Дедупликация по (ru, en) + исключения
 _THEME_EXCLUDE_EN = {"Attachment"}
