@@ -115,6 +115,7 @@ GENRE_GROUPS = {
         {"ru": "Русская", "en": "Russian"},
         {"ru": "Народная", "en": "Traditional / Folk"},
         {"ru": "Ретро / Винтаж", "en": "Vintage"},
+        {"ru": "Романс", "en": "Romance"},
         {"ru": "Саундтрек", "en": "Soundtrack"},
         {"ru": "Фолк", "en": "Folk"},
         {"ru": "Шансон", "en": "Chanson / Russian bard"},
@@ -136,12 +137,26 @@ for _t in _mood_raw:
 _POSITIVE_EN   = {"Upbeat","Uplifting","Positive","Happy","Hopeful","Cheerfulness",
                   "Joy","Excitement","Happiness","Amusement","Merriment",
                   "Laughter","Pleasure","Enjoyment","Party","Light"}
-_DARK_EN       = {"Dark","Tense","Tension","Gritty","Swagger","Mysterious","Moody"}
-_SAD_EN        = {"Sad","Reflective","Dreamy","Retro","Romantic","Warm"}
+_DARK_EN       = {"Dark","Tense","Tension","Gritty","Swagger","Mysterious","Moody","Gloomy"}
+_SAD_EN        = {"Sad","Reflective","Dreamy","Retro","Romantic","Warm",
+                  "Lyrical","Melancholic","Soulful","Calm"}
 _ENERGY_EN     = {"Energetic","Epic","Powerful","Driving","Anthemic","Building",
                   "Dramatic","Percussive","Rhythmic","Intense"}
 _FUN_EN        = {"Fun","Playful","Quirky","Catchy","Cool","Sexy"}
 # остальные → Атмосферные
+
+_EXTRA_MOODS = [
+    {"ru": "Душевное",      "en": "Soulful"},
+    {"ru": "Лирическое",    "en": "Lyrical"},
+    {"ru": "Медитативное",  "en": "Meditative"},
+    {"ru": "Меланхоличное", "en": "Melancholic"},
+    {"ru": "Мрачное",       "en": "Gloomy"},
+    {"ru": "Спокойное",     "en": "Calm"},
+]
+for _t in _EXTRA_MOODS:
+    if _t["en"] not in _mood_seen:
+        _mood_seen.add(_t["en"])
+        _mood_all.append(_t)
 
 def _group_mood_rest(tags: list[dict], already_used: set) -> list[dict]:
     return _by_ru([t for t in tags if t["en"] not in already_used])
