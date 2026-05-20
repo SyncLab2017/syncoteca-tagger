@@ -173,12 +173,14 @@ DECADES = [
 VOCAL_TAGS = _by_ru([
     {"ru": "Акапелла", "en": "A cappella"},
     {"ru": "Бэк-вокал", "en": "Background vocals"},
-    {"ru": "Без вокала", "en": "Instrumental"},
+    {"ru": "Вокалист", "en": "Vocalist"},
     {"ru": "Дуэт", "en": "Duet"},
     {"ru": "Женский вокал", "en": "Female vocal"},
+    {"ru": "Инструментальная", "en": "Instrumental"},
     {"ru": "Мужской вокал", "en": "Male vocal"},
     {"ru": "Речитатив / Рэп", "en": "Rap / Spoken"},
     {"ru": "Хор", "en": "Choir"},
+    {"ru": "Шёпотом", "en": "Whisper"},
 ])
 
 # ИНСТРУМЕНТЫ
