@@ -89,6 +89,7 @@ GENRE_GROUPS = {
         {"ru": "Поп-рок", "en": "Pop-Rock"},
         {"ru": "Танцевальная", "en": "Danceable"},
         {"ru": "Фанк", "en": "Funk"},
+        {"ru": "Синти-поп", "en": "Synth-pop"},
         {"ru": "Хип-хоп / Рэп", "en": "Hip-hop / Rap"},
         {"ru": "Электронная", "en": "Electronic"},
         {"ru": "R&B", "en": "R&B"},
