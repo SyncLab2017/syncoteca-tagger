@@ -101,6 +101,7 @@ GENRE_GROUPS = {
         {"ru": "Классика", "en": "Classical"},
         {"ru": "Нью-эйдж / Медитация", "en": "New Age / Meditation"},
         {"ru": "Регги", "en": "Reggae"},
+        {"ru": "Рок-н-ролл", "en": "Rock'n'Roll"},
         {"ru": "Соул", "en": "Soul"},
     ]),
     "🌍 Мировая / Русская / Ретро": _by_ru([
