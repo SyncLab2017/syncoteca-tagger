@@ -189,6 +189,7 @@ VOCAL_TAGS = _by_ru([
     {"ru": "Акапелла", "en": "A cappella"},
     {"ru": "Бэк-вокал", "en": "Background vocals"},
     {"ru": "Вокализ", "en": "Vocalise"},
+    {"ru": "Детский вокал", "en": "Children's vocal"},
     {"ru": "Дуэт", "en": "Duet"},
     {"ru": "Женский вокал", "en": "Female vocal"},
     {"ru": "Инструментальная", "en": "Instrumental"},
