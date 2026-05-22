@@ -231,7 +231,12 @@ _theme_all = _by_ru(
      {"ru": "Ссора", "en": "Quarrel"}]
 )
 # Дедупликация по (ru, en) + исключения
-_THEME_EXCLUDE_EN = {"Attachment"}
+_THEME_EXCLUDE_EN = {
+    "Attachment",
+    "Believe", "Change", "Commitment", "Empowerment", "Escape",
+    "Expedition", "Goal", "Hustle", "Loss", "Rebellion",
+    "Success", "Vision", "Voyage",
+}
 _seen: set = set()
 _theme_dedup: list[dict] = []
 for t in _theme_all:
