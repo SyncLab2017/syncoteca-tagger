@@ -527,10 +527,9 @@ def process_track(
 
     if source.startswith("http"):
         info, audio_path, dl_error = download_from_yandex(source, tmp_dir)
-        if not row["title"] or row["title"] == "—":
-            row["title"] = info.get("title") or info.get("track") or title or "—"
-        if not row["artist"] or row["artist"] == "—":
-            row["artist"] = info.get("artist") or info.get("uploader") or artist or "—"
+        # yt-dlp result takes priority; manual title/artist used as fallback
+        row["title"] = info.get("title") or info.get("track") or title or "—"
+        row["artist"] = info.get("artist") or info.get("uploader") or artist or "—"
         if dl_error and not audio_path:
             row["status"] = f"⚠️ аудио: {dl_error}"
     elif audio_file is not None:
@@ -662,7 +661,7 @@ with st.sidebar:
 tab_url, tab_upload = st.tabs(["🔗 Яндекс.Музыка URL", "📁 Загрузить файлы"])
 
 
-def _run_batch(sources: list, audio_files: list = None):
+def _run_batch(sources: list, audio_files: list = None, fallback_title: str = "", fallback_artist: str = ""):
     """Run tagging for a batch, yield results one by one."""
     results = []
     progress = st.progress(0)
@@ -684,6 +683,8 @@ def _run_batch(sources: list, audio_files: list = None):
                 label = url[:60]
                 row = process_track(
                     source=url,
+                    title=fallback_title,
+                    artist=fallback_artist,
                     api_key=api_key, tmp_dir=tmp, vocab=vocab,
                 )
 
@@ -708,8 +709,15 @@ with tab_url:
     urls_input = st.text_area(
         "По одной ссылке на строку",
         placeholder="https://music.yandex.ru/album/19399075/track/95265265",
-        height=150,
+        height=120,
     )
+
+    col_t, col_a = st.columns(2)
+    with col_t:
+        url_title = st.text_input("Название трека", placeholder="Например: Sail On", key="url_title")
+    with col_a:
+        url_artist = st.text_input("Артист", placeholder="Например: T-Bone Walker", key="url_artist")
+    st.caption("Если Яндекс.Музыка не отдаёт метаданные — введи название и артиста вручную")
 
     col1, col2 = st.columns([1, 3])
     with col1:
@@ -722,7 +730,7 @@ with tab_url:
         elif not api_key:
             st.error("Укажи Anthropic API Key в боковой панели")
         else:
-            results = _run_batch(urls)
+            results = _run_batch(urls, fallback_title=url_title.strip(), fallback_artist=url_artist.strip())
             st.session_state["results_url"] = results
 
     if st.session_state.get("results_url"):
