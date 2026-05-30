@@ -641,14 +641,15 @@ def _audio_context(m: dict, tuning: dict | None = None) -> str:
         else:
             gender_hint = f"vocal present, gender unclear (F0≈{f0:.0f}Hz)"
     else:
-        # "смешанный/неясно" — weak signal; could be harmonic instrument or voice.
-        # Pass F0 as a hint but flag low confidence so Claude uses title/genre too.
+        # "смешанный/неясно" — F0 autocorrelation found vocal-range pitch.
+        # Report gender directly; F0 >280Hz flagged as possible instrument.
         if gender == "female" and f0 < 280:
-            gender_hint = f"possible female vocal F0={f0:.0f}Hz (uncertain — mixed harmonic signal)"
+            gender_hint = f"female vocal F0={f0:.0f}Hz (mixed signal)"
         elif gender == "male":
-            gender_hint = f"possible male vocal F0={f0:.0f}Hz (uncertain — mixed harmonic signal)"
+            gender_hint = f"male vocal F0={f0:.0f}Hz (mixed signal)"
         else:
-            gender_hint = f"unclear — F0={f0:.0f}Hz (harmonic instrument or voice)"
+            # F0 >280Hz is saxophone/high-instrument range — don't commit to gender
+            gender_hint = f"unclear — F0={f0:.0f}Hz (likely harmonic instrument, not voice)"
 
     ctx = (
         f"Audio: BPM={m['bpm']}, key={m['key']}, "
@@ -721,7 +722,7 @@ RULES:
 - mood: {n_mood} tags that best describe the emotional feel
 - era: 1 tag (decade the track sounds like, not release year)
 - tempo: 1 tag
-- vocal: 1-2 tags — RULES: (1) "Instrumental" and gender tags are MUTUALLY EXCLUSIVE — never combine them. (2) if voice=instrumental* → ["Instrumental"] only. (3) if voice=female/male vocal → use that gender. (4) if voice=possible/uncertain/unclear → use track title+genre as primary signal: Jazz/Lounge/Ambient/Drone titles with no lyric context → ["Instrumental"]; titles suggesting a song with lyrics → pick gender from F0 hint.
+- vocal: 1-2 tags — RULES: (1) "Instrumental" and gender tags are MUTUALLY EXCLUSIVE — never combine them. (2) if voice=instrumental* → ["Instrumental"] only. (3) if voice=female vocal* OR male vocal* (even with "mixed signal") → use that gender tag — the F0 detector found real vocal-range pitch. (4) if voice=unclear* or "likely harmonic instrument" → ["Instrumental"]. DEFAULT TO VOCAL when F0 signal is present — most tracks have singers.
 - instr: {n_instr} prominent instruments (empty array if unclear)
 - theme: {n_theme} lyric themes (empty array if instrumental or unclear)
 
