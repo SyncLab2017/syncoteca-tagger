@@ -737,9 +737,14 @@ def process_track(
             row["status"] = f"⚠️ аудио: {dl_error}"
     elif audio_file is not None:
         ext = Path(audio_file.name).suffix
+        audio_bytes = audio_file.getvalue()
+        row["_audio_bytes"] = audio_bytes
+        row["_audio_mime"] = {".mp3": "audio/mpeg", ".wav": "audio/wav",
+                               ".flac": "audio/flac", ".ogg": "audio/ogg",
+                               ".m4a": "audio/mp4"}.get(ext.lower(), "audio/mpeg")
         audio_path = f"{tmp_dir}/uploaded{ext}"
         with open(audio_path, "wb") as f:
-            f.write(audio_file.getvalue())
+            f.write(audio_bytes)
 
     if audio_path and Path(audio_path).exists():
         metrics = analyze_audio(audio_path, tuning)
@@ -761,6 +766,7 @@ def process_track(
                 "voiced_ratio":   metrics.get("voiced_ratio", ""),
                 "audio_analyzed": True,
             })
+            row["_audio_metrics"] = metrics  # cached for re-tag without re-analysis
     else:
         metrics = {"audio_analyzed": False}
 
@@ -891,6 +897,10 @@ def _render_track_card(row: dict, idx: int = 0, results_key: str = ""):
     if row.get("source", "").startswith("http") and "yandex" in row.get("source", ""):
         _yandex_player(row["source"])
 
+    # Audio player for uploaded files
+    if row.get("_audio_bytes"):
+        st.audio(row["_audio_bytes"], format=row.get("_audio_mime", "audio/mpeg"))
+
     st.markdown(f"**{row['title']}** — {row['artist']}")
     if row.get("bpm"):
         gender_str = ""
@@ -920,6 +930,24 @@ def _render_track_card(row: dict, idx: int = 0, results_key: str = ""):
     if tuning.get("debug_claude") and row.get("_claude_raw"):
         with st.expander("🤖 Ответ Claude (raw JSON)"):
             st.code(row["_claude_raw"], language="json")
+
+    # Re-tag button: re-runs only Claude with current tuning (audio metrics cached)
+    if results_key and row.get("_audio_metrics"):
+        k = f"{results_key}_{idx}"
+        if st.button("🔄 Перетегировать с текущими настройками", key=f"retag_{k}"):
+            ak = st.session_state.get("api_key", "")
+            if ak:
+                with st.spinner("Перетегирую..."):
+                    new_tags = enrich_with_claude(
+                        row["title"], row["artist"],
+                        row["_audio_metrics"], ak, vocab, tuning,
+                    )
+                if "error" not in new_tags:
+                    st.session_state[results_key][idx].update(new_tags)
+                    st.session_state[results_key][idx]["status"] = "✅"
+                    st.rerun()
+                else:
+                    st.error(new_tags["error"])
 
     if results_key:
         with st.expander("✏️ Исправить теги"):
@@ -1037,24 +1065,80 @@ with st.sidebar:
         debug_claude  = st.checkbox("Показать JSON от Claude",           key="s_debug_claude")
 
     # Write tuning dict into session_state — read by _run_batch + _render_track_card
-    st.session_state["tuning"] = {
-        "bpm_min":        bpm_min,
-        "bpm_max":        bpm_max,
+    current_tuning = {
+        "bpm_min":         bpm_min,
+        "bpm_max":         bpm_max,
         "bpm_anti_double": anti_double,
         "energy_baseline": energy_base,
-        "vocal_hi":       vocal_hi,
-        "vocal_lo":       vocal_lo,
-        "zcr_vocal_hi":   zcr_vocal,
-        "f0_female":      f0_female,
-        "f0_male":        f0_male,
-        "claude_temp":    claude_temp,
-        "n_genre":        n_genre,
-        "n_mood":         n_mood,
-        "n_instr":        n_instr,
-        "n_theme":        n_theme,
-        "debug_metrics":  debug_metrics,
-        "debug_claude":   debug_claude,
+        "vocal_hi":        vocal_hi,
+        "vocal_lo":        vocal_lo,
+        "zcr_vocal_hi":    zcr_vocal,
+        "f0_female":       f0_female,
+        "f0_male":         f0_male,
+        "claude_temp":     claude_temp,
+        "n_genre":         n_genre,
+        "n_mood":          n_mood,
+        "n_instr":         n_instr,
+        "n_theme":         n_theme,
+        "debug_metrics":   debug_metrics,
+        "debug_claude":    debug_claude,
     }
+    st.session_state["tuning"] = current_tuning
+    st.session_state["api_key"] = api_key  # accessible from _render_track_card
+
+    st.divider()
+
+    # ─── Presets ──────────────────────────────────────────────────────────────
+    if "presets" not in st.session_state:
+        st.session_state["presets"] = {}
+
+    with st.expander("🗂 Пресеты настроек", expanded=False):
+        preset_name = st.text_input("Название пресета", placeholder="Например: инди-женский")
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("💾 Сохранить", key="preset_save"):
+                if preset_name.strip():
+                    st.session_state["presets"][preset_name.strip()] = dict(current_tuning)
+                    st.success(f"Сохранён: {preset_name.strip()}")
+        with c2:
+            preset_json = json.dumps(st.session_state["presets"], ensure_ascii=False, indent=2)
+            st.download_button("⬇️ Экспорт", preset_json.encode("utf-8"),
+                               "syncoteca_presets.json", "application/json", key="preset_export")
+
+        if st.session_state["presets"]:
+            st.divider()
+            selected = st.selectbox("Загрузить пресет", list(st.session_state["presets"].keys()),
+                                    key="preset_select")
+            c3, c4 = st.columns(2)
+            with c3:
+                if st.button("📂 Загрузить", key="preset_load"):
+                    p = st.session_state["presets"][selected]
+                    _key_map = {
+                        "bpm_min": "s_bpm_min", "bpm_max": "s_bpm_max",
+                        "bpm_anti_double": "s_anti_double", "energy_baseline": "s_energy_base",
+                        "vocal_hi": "s_vocal_hi", "vocal_lo": "s_vocal_lo",
+                        "zcr_vocal_hi": "s_zcr_vocal", "f0_female": "s_f0_female",
+                        "f0_male": "s_f0_male", "claude_temp": "s_claude_temp",
+                        "n_genre": "s_n_genre", "n_mood": "s_n_mood",
+                        "n_instr": "s_n_instr", "n_theme": "s_n_theme",
+                    }
+                    for tk, sk in _key_map.items():
+                        if tk in p:
+                            st.session_state[sk] = p[tk]
+                    st.rerun()
+            with c4:
+                if st.button("🗑 Удалить", key="preset_delete"):
+                    del st.session_state["presets"][selected]
+                    st.rerun()
+
+        uploaded_presets = st.file_uploader("⬆️ Импорт JSON", type="json", key="preset_import")
+        if uploaded_presets:
+            try:
+                imported = json.loads(uploaded_presets.getvalue())
+                st.session_state["presets"].update(imported)
+                st.success(f"Импортировано: {len(imported)} пресетов")
+            except Exception as e:
+                st.error(f"Ошибка: {e}")
 
     st.divider()
     st.caption("Форматы аудио: MP3, WAV, FLAC, OGG")
