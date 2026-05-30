@@ -491,20 +491,119 @@ def download_from_yandex(url: str, out_dir: str) -> tuple[dict, str | None, str 
 
 # ─── Claude enrichment ────────────────────────────────────────────────────────
 
-_FEW_SHOT = """EXAMPLES (use as reference for tag quality and quantity):
+_FALLBACK_EXAMPLES = [
+    {"title": "Sail On", "artist": "T-Bone Walker",
+     "genre": ["Funk","Soul"], "mood": ["Positive","Rhythmic","Energetic","Fun","Swagger"],
+     "era": ["1970s"], "tempo": ["Fast"], "vocal": ["Male vocal"],
+     "instr": ["Drums","Bass guitar","Electric guitar","Synth","Percussion"], "theme": ["Passion"]},
+    {"title": "Crime in Action", "artist": "Paolo Vivaldi",
+     "genre": ["Classical","World"], "mood": ["Dramatic","Intense","Epic"],
+     "era": ["2010s"], "tempo": ["Fast"], "vocal": ["Instrumental"],
+     "instr": ["Orchestra","Strings","Drums"], "theme": []},
+    {"title": "Fake Luv", "artist": "Rozalia",
+     "genre": ["Pop","Electronic"], "mood": ["Energetic","Sexy","Swagger"],
+     "era": ["2020s"], "tempo": ["Midtempo"], "vocal": ["Female vocal"],
+     "instr": ["Synth","Bass guitar"], "theme": []},
+    {"title": "Мария Магдалена", "artist": "Филипп Киркоров",
+     "genre": ["Pop-Rock","Estrada (Soviet pop)"], "mood": ["Epic","Dramatic","Romantic"],
+     "era": ["1990s"], "tempo": ["Midtempo"], "vocal": ["Male vocal","Background vocals"],
+     "instr": [], "theme": []},
+]
 
-Track: "Sail On" by T-Bone Walker
-{"genre":["Funk","Soul"],"mood":["Positive","Rhythmic","Energetic","Percussive","Fun","Swagger"],"era":["1970s"],"tempo":["Fast"],"vocal":["Male vocal"],"instr":["Drums","Bass guitar","Electric guitar","Synth","Percussion"],"theme":["Passion"]}
 
-Track: "Crime in Action" by Paolo Vivaldi
-{"genre":["Classical","World"],"mood":["Dramatic","Intense","Epic"],"era":["2010s"],"tempo":["Fast"],"vocal":["Instrumental"],"instr":["Orchestra","Strings","Drums"],"theme":[]}
+@st.cache_data(ttl=3600, show_spinner=False)
+def _load_catalog_examples() -> list[dict]:
+    """Load fully-tagged human examples from Supabase for dynamic few-shot selection."""
+    sb = _supabase()
+    if not sb:
+        return _FALLBACK_EXAMPLES
+    try:
+        resp = (sb.table("human_tags")
+                .select("title,artist,genre,mood,era,tempo,vocal,instr,theme")
+                .neq("employee", "auto")
+                .neq("genre", "[]")
+                .neq("vocal", "[]")
+                .neq("era", "[]")
+                .neq("mood", "[]")
+                .limit(600)
+                .execute())
+        rows = resp.data or []
+        result = []
+        for r in rows:
+            try:
+                ex = {
+                    "title":  r.get("title", ""),
+                    "artist": r.get("artist", ""),
+                }
+                for cat in ("genre", "mood", "era", "tempo", "vocal", "instr", "theme"):
+                    val = r.get(cat, "[]")
+                    parsed = json.loads(val) if isinstance(val, str) else (val or [])
+                    ex[cat] = [t["en"] for t in parsed if isinstance(t, dict) and "en" in t]
+                if ex["genre"] and ex["vocal"]:
+                    result.append(ex)
+            except Exception:
+                pass
+        return result if result else _FALLBACK_EXAMPLES
+    except Exception:
+        return _FALLBACK_EXAMPLES
 
-Track: "Fake Luv" by Rozalia
-{"genre":["Pop","Electronic"],"mood":["Energetic","Sexy","Swagger"],"era":["2020s"],"tempo":["Midtempo"],"vocal":["Female vocal"],"instr":["Synth","Bass guitar"],"theme":[]}
 
-Track: "Мария Магдалена" by Филипп Киркоров
-{"genre":["Pop-Rock","Estrada (Soviet pop)"],"mood":["Epic","Dramatic","Romantic"],"era":["1990s"],"tempo":["Midtempo"],"vocal":["Male vocal","Background vocals"],"instr":[],"theme":[]}
-"""
+def _select_examples(audio_metrics: dict, catalog: list[dict], n: int = 5) -> list[dict]:
+    """Pick n catalog examples relevant to this track's audio profile."""
+    import random
+    if len(catalog) <= n:
+        return catalog
+
+    gender = audio_metrics.get("gender", "unclear")
+    energy = audio_metrics.get("energy", 0.5)
+    tempo_label = ("Fast" if audio_metrics.get("bpm", 0) > 130
+                   else "Slow" if audio_metrics.get("bpm", 0) < 80
+                   else "Midtempo")
+
+    def vocal_en(ex):
+        return (ex.get("vocal") or [""])[0]
+
+    # Primary filter: same vocal gender
+    target_vocal = ("Female vocal" if gender == "female"
+                    else "Male vocal" if gender == "male"
+                    else "Instrumental" if gender == "instrumental"
+                    else None)
+
+    if target_vocal:
+        matching   = [e for e in catalog if vocal_en(e) == target_vocal]
+        other      = [e for e in catalog if vocal_en(e) != target_vocal]
+    else:
+        matching   = catalog
+        other      = []
+
+    # Secondary: same tempo bucket
+    tempo_match = [e for e in matching if tempo_label in (e.get("tempo") or [])]
+    tempo_other = [e for e in matching if tempo_label not in (e.get("tempo") or [])]
+
+    # Build pool: prefer tempo+vocal match, then vocal match, then anything
+    pool = tempo_match + tempo_other + other
+    # Deduplicate keeping order
+    seen, deduped = set(), []
+    for e in pool:
+        key = (e["title"], e["artist"])
+        if key not in seen:
+            seen.add(key)
+            deduped.append(e)
+
+    # Take first (n-1) best matches + 1 random from the rest for variety
+    best = deduped[:n - 1]
+    rest = deduped[n - 1:]
+    extra = [random.choice(rest)] if rest else []
+    return best + extra
+
+
+def _format_examples(examples: list[dict]) -> str:
+    lines = ["EXAMPLES FROM OUR CATALOG — match this tagging style exactly:"]
+    for ex in examples:
+        tag = {cat: ex.get(cat, []) for cat in ("genre","mood","era","tempo","vocal","instr","theme")}
+        lines.append(f'\nTrack: "{ex["title"]}" by {ex["artist"]}')
+        lines.append(json.dumps(tag, ensure_ascii=False))
+    return "\n".join(lines)
 
 
 def _audio_context(m: dict, tuning: dict | None = None) -> str:
@@ -560,6 +659,7 @@ def enrich_with_claude(
     api_key: str,
     vocab: dict,
     tuning: dict | None = None,
+    catalog_examples: list | None = None,
 ) -> dict:
     """Returns {"genre":[{en,ru},...], "mood":[...], "era":[...], "tempo":[...], "vocal":[...], "instr":[...], "theme":[...]}"""
     t = tuning or {}
@@ -579,7 +679,13 @@ def enrich_with_claude(
     n_mood  = t.get("n_mood",  "3-7")
     n_instr = t.get("n_instr", "2-6")
     n_theme = t.get("n_theme", "0-3")
+    n_examples = int(t.get("n_examples", 5))
     temperature = float(t.get("claude_temp", 0.2))
+
+    # Dynamic few-shot from catalog
+    cat = catalog_examples or _FALLBACK_EXAMPLES
+    selected = _select_examples(audio_metrics, cat, n=n_examples)
+    few_shot_block = _format_examples(selected)
 
     prompt = f"""You are a sync music licensing expert tagging tracks for a professional catalog.
 Tag this track using ONLY tags from the vocabulary below.
@@ -602,11 +708,11 @@ RULES:
 - mood: {n_mood} tags that best describe the emotional feel
 - era: 1 tag (decade the track sounds like, not release year)
 - tempo: 1 tag
-- vocal: 1-2 tags — TRUST the audio voice= signal above for gender (female/male); use "Instrumental" ONLY if voiced_ratio is very low or gender hint says instrumental
+- vocal: 1-2 tags — TRUST the audio voice= signal for gender; use "Instrumental" ONLY if voiced_ratio is very low
 - instr: {n_instr} prominent instruments (empty array if unclear)
 - theme: {n_theme} lyric themes (empty array if instrumental or unclear)
 
-{_FEW_SHOT}
+{few_shot_block}
 Now tag this track. Return JSON only:"""
 
     def _map(en_list: list, cat: str) -> list[dict]:
@@ -703,6 +809,7 @@ def process_track(
     tmp_dir: str = "",
     vocab: dict = None,
     tuning: dict | None = None,
+    catalog: list | None = None,
 ) -> dict:
     row = {
         "title": title or "—",
@@ -771,7 +878,7 @@ def process_track(
         metrics = {"audio_analyzed": False}
 
     if api_key and vocab:
-        tags = enrich_with_claude(row["title"], row["artist"], metrics, api_key, vocab, tuning)
+        tags = enrich_with_claude(row["title"], row["artist"], metrics, api_key, vocab, tuning, catalog)
         if "error" not in tags:
             row.update(tags)
             row["status"] = "✅"
@@ -936,11 +1043,12 @@ def _render_track_card(row: dict, idx: int = 0, results_key: str = ""):
         k = f"{results_key}_{idx}"
         if st.button("🔄 Перетегировать с текущими настройками", key=f"retag_{k}"):
             ak = st.session_state.get("api_key", "")
+            cat = st.session_state.get("catalog_examples", _FALLBACK_EXAMPLES)
             if ak:
                 with st.spinner("Перетегирую..."):
                     new_tags = enrich_with_claude(
                         row["title"], row["artist"],
-                        row["_audio_metrics"], ak, vocab, tuning,
+                        row["_audio_metrics"], ak, vocab, tuning, cat,
                     )
                 if "error" not in new_tags:
                     st.session_state[results_key][idx].update(new_tags)
@@ -1004,6 +1112,13 @@ def _to_csv_export(results: list[dict]) -> bytes:
 
 vocab = _build_vocab()
 
+# Load catalog examples for dynamic few-shot (cached 1h)
+# Must load after _supabase() is available (it uses @st.cache_resource)
+if "catalog_examples" not in st.session_state:
+    with st.spinner("Загружаю каталог для few-shot..."):
+        st.session_state["catalog_examples"] = _load_catalog_examples()
+_catalog_size = len(st.session_state["catalog_examples"])
+
 st.title("🎵 Syncoteca Tagger")
 st.caption("Авто-тегирование музыкального каталога для sync-лицензирования")
 
@@ -1051,7 +1166,10 @@ with st.sidebar:
                                  help="Мужской вокал обычно 80–150 Гц; подними если путает баритон с женским")
 
         st.divider()
-        st.markdown("**Claude**")
+        st.markdown("**Claude + Каталог**")
+        n_examples   = st.slider("Примеров из каталога на трек", 2, 10, 5,
+                                 key="s_n_examples",
+                                 help="Сколько похожих треков из ваших 600 показывать Claude как образец")
         claude_temp  = st.slider("Температура (0=точный, 1=творческий)", 0.0, 1.0, 0.2,
                                  step=0.1, key="s_claude_temp")
         n_genre      = st.select_slider("Жанров",      ["1", "1-2", "1-3", "2-4"], value="1-3", key="s_n_genre")
@@ -1076,6 +1194,7 @@ with st.sidebar:
         "f0_female":       f0_female,
         "f0_male":         f0_male,
         "claude_temp":     claude_temp,
+        "n_examples":      n_examples,
         "n_genre":         n_genre,
         "n_mood":          n_mood,
         "n_instr":         n_instr,
@@ -1145,6 +1264,7 @@ with st.sidebar:
     st.caption("URL: Яндекс.Музыка, SoundCloud, YouTube")
     st.divider()
     st.caption(f"Жанров: {len(vocab['genre'])} · Настроений: {len(vocab['mood'])} · Тем: {len(vocab['theme'])}")
+    st.caption(f"📚 Каталог: {_catalog_size} треков-образцов")
 
 
 tab_url, tab_upload = st.tabs(["🔗 Яндекс.Музыка URL", "📁 Загрузить файлы"])
@@ -1152,7 +1272,8 @@ tab_url, tab_upload = st.tabs(["🔗 Яндекс.Музыка URL", "📁 За�
 
 def _run_batch(sources: list, audio_files: list = None, fallback_title: str = "", fallback_artist: str = ""):
     """Run tagging for a batch, yield results one by one."""
-    tuning = st.session_state.get("tuning", {})
+    tuning   = st.session_state.get("tuning", {})
+    catalog  = st.session_state.get("catalog_examples", _FALLBACK_EXAMPLES)
     results = []
     progress = st.progress(0)
     status_text = st.empty()
@@ -1167,7 +1288,7 @@ def _run_batch(sources: list, audio_files: list = None, fallback_title: str = ""
                     source=uf.name, audio_file=uf,
                     title=title or uf.name, artist=artist,
                     api_key=api_key, tmp_dir=tmp, vocab=vocab,
-                    tuning=tuning,
+                    tuning=tuning, catalog=catalog,
                 )
             else:
                 url = item
@@ -1177,7 +1298,7 @@ def _run_batch(sources: list, audio_files: list = None, fallback_title: str = ""
                     title=fallback_title,
                     artist=fallback_artist,
                     api_key=api_key, tmp_dir=tmp, vocab=vocab,
-                    tuning=tuning,
+                    tuning=tuning, catalog=catalog,
                 )
 
             status_text.text(f"Обрабатываю {i+1}/{len(sources)}: {label}...")
