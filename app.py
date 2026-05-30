@@ -327,7 +327,7 @@ def analyze_audio(file_path: str) -> dict:
             key = _detect_key(y, TARGET_SR)
 
         rms = float(np.sqrt(np.mean(y ** 2)))
-        energy = float(np.clip(rms * 20, 0.0, 1.0))
+        energy = float(np.clip(rms / 0.3, 0.0, 1.0))  # 0.3 RMS ≈ loud track → 1.0
         vocal_presence = _hpss_ratio(y, TARGET_SR)
 
         return {
@@ -613,13 +613,100 @@ def process_track(
     return row
 
 
+# ─── Filename parsing ─────────────────────────────────────────────────────────
+
+def _parse_filename(name: str) -> tuple[str, str]:
+    """Extract (title, artist) from 'Artist_-_Title.mp3' style filenames."""
+    stem = Path(name).stem
+    stem = re.sub(r'\([^)]*\)', '', stem)   # remove (TheMP3.Info) etc.
+    stem = re.sub(r'\[[^\]]*\]', '', stem)  # remove [320kbps] etc.
+    stem = stem.replace('_', ' ').strip()
+    parts = re.split(r'\s*-\s*', stem, maxsplit=1)
+    if len(parts) == 2 and parts[0].strip() and parts[1].strip():
+        return parts[1].strip(), parts[0].strip()  # title, artist
+    return stem, ""
+
+
 # ─── Display helpers ──────────────────────────────────────────────────────────
 
+import streamlit.components.v1 as components
+
+
 def _tags_text(tags: list[dict]) -> str:
-    return " · ".join(f"{t['ru']}" for t in tags) if tags else "—"
+    return " · ".join(t['ru'] for t in tags) if tags else "—"
 
 
-def _render_track_card(row: dict):
+def _tag_labels(tags: list[dict]) -> list[str]:
+    return [f"{t['ru']} · {t['en']}" for t in tags]
+
+
+def _labels_to_tags(labels: list[str], vocab_cat: dict) -> list[dict]:
+    result = []
+    for label in (labels or []):
+        parts = label.split(" · ", 1)
+        if len(parts) == 2:
+            tag = vocab_cat.get(parts[1].strip())
+            if tag:
+                result.append(tag)
+    return result
+
+
+def _yandex_player(url: str):
+    tid = re.search(r"/track/(\d+)", url)
+    aid = re.search(r"/album/(\d+)", url)
+    if not tid:
+        return
+    src = f"https://music.yandex.ru/iframe/#track/{tid.group(1)}"
+    if aid:
+        src += f"/{aid.group(1)}"
+    components.html(
+        f'<iframe style="border:none;width:100%;height:88px;border-radius:8px" '
+        f'src="{src}" allow="autoplay"></iframe>', height=94,
+    )
+
+
+def _correction_form(row: dict, idx: int, results_key: str):
+    """Inline tag correction form. Saves to session_state + Supabase on submit."""
+    with st.form(key=f"corr_{results_key}_{idx}"):
+        g_all = sorted(_tag_labels(list(vocab["genre"].values())))
+        m_all = sorted(_tag_labels(list(vocab["mood"].values())))
+        e_all = _tag_labels(list(vocab["era"].values()))
+        t_all = _tag_labels(list(vocab["tempo"].values()))
+        v_all = sorted(_tag_labels(list(vocab["vocal"].values())))
+        i_all = sorted(_tag_labels(list(vocab["instr"].values())))
+        th_all = sorted(_tag_labels(list(vocab["theme"].values())))
+
+        new_g  = st.pills("Жанр",         g_all,  default=_tag_labels(row.get("genre",  [])), selection_mode="multi", key=f"cg_{results_key}_{idx}")
+        new_m  = st.pills("Настроение",   m_all,  default=_tag_labels(row.get("mood",   [])), selection_mode="multi", key=f"cm_{results_key}_{idx}")
+        new_e  = st.pills("Эпоха",        e_all,  default=_tag_labels(row.get("era",    [])), selection_mode="multi", key=f"ce_{results_key}_{idx}")
+        new_t  = st.pills("Темп",         t_all,  default=_tag_labels(row.get("tempo",  [])), selection_mode="multi", key=f"ct_{results_key}_{idx}")
+        new_v  = st.pills("Вокал",        v_all,  default=_tag_labels(row.get("vocal",  [])), selection_mode="multi", key=f"cv_{results_key}_{idx}")
+        new_i  = st.pills("Инструменты",  i_all,  default=_tag_labels(row.get("instr",  [])), selection_mode="multi", key=f"ci_{results_key}_{idx}")
+        new_th = st.pills("Темы текста",  th_all, default=_tag_labels(row.get("theme",  [])), selection_mode="multi", key=f"cth_{results_key}_{idx}")
+
+        if st.form_submit_button("💾 Сохранить исправления", type="primary"):
+            corrected = {
+                "genre": _labels_to_tags(new_g,  vocab["genre"]),
+                "mood":  _labels_to_tags(new_m,  vocab["mood"]),
+                "era":   _labels_to_tags(new_e,  vocab["era"]),
+                "tempo": _labels_to_tags(new_t,  vocab["tempo"]),
+                "vocal": _labels_to_tags(new_v,  vocab["vocal"]),
+                "instr": _labels_to_tags(new_i,  vocab["instr"]),
+                "theme": _labels_to_tags(new_th, vocab["theme"]),
+            }
+            st.session_state[results_key][idx].update(corrected)
+            err = save_to_supabase({**st.session_state[results_key][idx], "notes": "corrected"})
+            if err:
+                st.warning(f"Supabase: {err}")
+            else:
+                st.success("Сохранено!")
+            st.rerun()
+
+
+def _render_track_card(row: dict, idx: int = 0, results_key: str = ""):
+    if row.get("source", "").startswith("http") and "yandex" in row.get("source", ""):
+        _yandex_player(row["source"])
+
     st.markdown(f"**{row['title']}** — {row['artist']}")
     if row.get("bpm"):
         st.caption(f"BPM: {row['bpm']} · {row.get('key', '')} · Энергия: {row.get('energy', '')}")
@@ -634,6 +721,10 @@ def _render_track_card(row: dict):
         st.markdown(f"🎤 **Вокал:** {_tags_text(row.get('vocal', []))}")
         st.markdown(f"🎹 **Инструменты:** {_tags_text(row.get('instr', []))}")
         st.markdown(f"📝 **Тема:** {_tags_text(row.get('theme', []))}")
+
+    if results_key:
+        with st.expander("✏️ Исправить теги"):
+            _correction_form(row, idx, results_key)
 
 
 def _results_to_df(results: list[dict]) -> pd.DataFrame:
@@ -786,9 +877,9 @@ with tab_url:
 
         st.divider()
         st.subheader("Результаты")
-        for r in results:
+        for i, r in enumerate(results):
             with st.expander(f"{r['status']} {r['title']} — {r['artist']}"):
-                _render_track_card(r)
+                _render_track_card(r, idx=i, results_key="results_url")
 
         csv_bytes = _to_csv_export(results)
         st.download_button(
@@ -815,16 +906,17 @@ with tab_upload:
         st.write(f"Загружено файлов: {len(uploaded_files)}")
 
         meta_rows = []
-        with st.expander("➕ Добавить метаданные вручную (опционально)"):
+        with st.expander("➕ Метаданные (автопарсинг из имени файла, можно изменить)"):
             for uf in uploaded_files:
+                auto_title, auto_artist = _parse_filename(uf.name)
                 c1, c2 = st.columns(2)
                 with c1:
-                    t = st.text_input("Название", key=f"t_{uf.name}", placeholder=uf.name)
+                    t = st.text_input("Название", key=f"t_{uf.name}", value=auto_title)
                 with c2:
-                    a = st.text_input("Артист", key=f"a_{uf.name}")
+                    a = st.text_input("Артист", key=f"a_{uf.name}", value=auto_artist)
                 meta_rows.append((uf, t, a))
         if not meta_rows:
-            meta_rows = [(uf, "", "") for uf in uploaded_files]
+            meta_rows = [(uf, *_parse_filename(uf.name)) for uf in uploaded_files]
 
         col1, _ = st.columns([1, 3])
         with col1:
@@ -842,9 +934,9 @@ with tab_upload:
 
         st.divider()
         st.subheader("Результаты")
-        for r in results:
+        for i, r in enumerate(results):
             with st.expander(f"{r['status']} {r['title']} — {r['artist']}"):
-                _render_track_card(r)
+                _render_track_card(r, idx=i, results_key="results_upload")
 
         csv_bytes = _to_csv_export(results)
         st.download_button(
