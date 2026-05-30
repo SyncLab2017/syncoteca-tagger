@@ -425,74 +425,69 @@ def _detect_key(y: np.ndarray, sr: int) -> str:
     return f"{best_key} {best_mode}"
 
 
-def _separate_vocals(file_path: str) -> str | None:
-    """Run Demucs to extract vocal stem.
-    Samples 2 × 15s at 25% + 60% of track duration, concatenates → 30s clip.
-    One Demucs pass on 30s ≈ 35-40s processing. Better coverage than 1×20s.
-    Returns path to vocals.wav or None if demucs unavailable/failed."""
+def _detect_gender_praat(file_path: str) -> dict:
+    """Fast vocal gender detection via Praat pitch analysis (parselmouth).
+    Samples 3 × 15s at 25/45/65%, collects voiced frames, uses p80.
+    pitch_floor=150Hz suppresses bass guitar/synth bass harmonics.
+    ~5s total vs ~40s for Demucs. Returns gender/p80/method keys."""
     try:
-        script_dir = Path(__file__).parent
-        python = str(script_dir / "venv" / "bin" / "python3")
-        if not Path(python).exists():
-            python = "python3"
+        import parselmouth as _pm
+    except ImportError:
+        return {"gender": "unclear", "f0_p80": 0.0, "method": "praat_unavailable"}
 
-        ffmpeg = shutil.which("ffmpeg")
-        if not ffmpeg:
-            return None
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return {"gender": "unclear", "f0_p80": 0.0, "method": "no_ffmpeg"}
 
-        probe = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-             "-of", "default=noprint_wrappers=1:nokey=1", file_path],
-            capture_output=True, text=True, timeout=15,
-        )
-        try:
-            duration = float(probe.stdout.strip())
-        except (ValueError, AttributeError):
-            duration = 180.0
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", file_path],
+        capture_output=True, text=True, timeout=15,
+    )
+    try:
+        duration = float(probe.stdout.strip())
+    except (ValueError, AttributeError):
+        duration = 180.0
 
-        work_dir = tempfile.mkdtemp(prefix="demucs_")
-        snippet_files = []
-        for pct in (0.25, 0.60):
+    work_dir = tempfile.mkdtemp(prefix="praat_")
+    all_voiced = []
+    try:
+        for pct in (0.25, 0.45, 0.65):
             start = max(0.0, duration * pct - 7.5)
-            out_f = str(Path(work_dir) / f"snip_{int(pct*100)}.wav")
+            clip = str(Path(work_dir) / f"clip_{int(pct*100)}.wav")
             r = subprocess.run(
                 [ffmpeg, "-y", "-i", file_path, "-ss", f"{start:.1f}", "-t", "15",
-                 "-ac", "2", "-ar", "44100", out_f],
+                 "-ac", "1", "-ar", "44100", clip],
                 capture_output=True, timeout=30,
             )
-            if r.returncode == 0 and Path(out_f).exists() and Path(out_f).stat().st_size > 1000:
-                snippet_files.append(out_f)
-
-        if not snippet_files:
-            return None
-
-        if len(snippet_files) == 1:
-            input_path = snippet_files[0]
-        else:
-            concat_list = str(Path(work_dir) / "concat.txt")
-            with open(concat_list, "w") as fh:
-                for sf_path in snippet_files:
-                    fh.write(f"file '{sf_path}'\n")
-            combined = str(Path(work_dir) / "clip.wav")
-            r = subprocess.run(
-                [ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", concat_list,
-                 "-c", "copy", combined],
-                capture_output=True, timeout=30,
+            if r.returncode != 0 or not Path(clip).exists():
+                continue
+            snd = _pm.Sound(clip)
+            # floor=150 Hz: filters bass guitar/synth bass fundamentals (<150 Hz)
+            # while retaining human vocal harmonics; ceil=600 covers soprano
+            pitch = snd.to_pitch_ac(
+                pitch_floor=150, pitch_ceiling=600,
+                silence_threshold=0.03, voicing_threshold=0.45,
             )
-            input_path = combined if r.returncode == 0 else snippet_files[0]
+            freqs = pitch.selected_array["frequency"]
+            all_voiced.extend(freqs[freqs > 0].tolist())
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
 
-        out_dir = str(Path(work_dir) / "stems")
-        result = subprocess.run(
-            [python, "-m", "demucs", "--two-stems=vocals", "--out", out_dir, input_path],
-            capture_output=True, text=True, timeout=300,
-        )
-        if result.returncode != 0:
-            return None
-        for p in Path(out_dir).rglob("vocals.wav"):
-            return str(p)
-        return None
-    except Exception:
-        return None
+    if len(all_voiced) < 20:
+        return {"gender": "unclear", "f0_p80": 0.0, "method": "praat_sparse"}
+
+    p80 = float(np.percentile(all_voiced, 80))
+    # Calibrated on Russian pop/dance catalog:
+    # female p80 consistently >333 Hz; male p80 <300 Hz; unclear zone 300-333
+    if p80 > 333:
+        gender = "female"
+    elif p80 < 300:
+        gender = "male"
+    else:
+        gender = "unclear"
+
+    return {"gender": gender, "f0_p80": round(p80, 0), "method": "praat"}
 
 
 def analyze_audio(file_path: str, tuning: dict | None = None) -> dict:
@@ -540,29 +535,7 @@ def analyze_audio(file_path: str, tuning: dict | None = None) -> dict:
         vocal_presence = _hpss_ratio(y, TARGET_SR)
         spec = _spectral_features(y, TARGET_SR)
 
-        # Try Demucs vocal stem for accurate gender detection
-        vocals_path = _separate_vocals(file_path)
-        if vocals_path:
-            y_vocal, sr_vocal = sf.read(vocals_path, always_2d=False)
-            if y_vocal.ndim > 1:
-                y_vocal = y_vocal.mean(axis=1)
-            y_vocal = y_vocal.astype(np.float32)
-            if sr_vocal != TARGET_SR:
-                n_target = int(len(y_vocal) * TARGET_SR / sr_vocal)
-                y_vocal = np.interp(np.linspace(0, len(y_vocal) - 1, n_target), np.arange(len(y_vocal)), y_vocal)
-            gender_info = _detect_vocal_gender(
-                y_vocal, TARGET_SR,
-                use_stem_mode=True,
-            )
-            gender_info["demucs"] = True
-        else:
-            gender_info = _detect_vocal_gender(
-                y, TARGET_SR,
-                f0_female=float(t.get("f0_female", 180.0)),
-                f0_male=float(t.get("f0_male", 140.0)),
-                use_stem_mode=False,
-            )
-            gender_info["demucs"] = False
+        gender_info = _detect_gender_praat(file_path)
 
         return {
             "bpm":            round(bpm, 1),
@@ -772,43 +745,31 @@ def _audio_context(m: dict, tuning: dict | None = None) -> str:
     else:
         vocal_label = "смешанный/неясно"
 
-    # Vocal presence: HPSS+ZCR determines if vocal EXISTS; F0 is a weak fallback.
-    # F0 detection on mixed audio is unreliable for gender (synths/instruments
-    # produce pitch in vocal range). Gender must come from Claude's artist knowledge.
-    f0 = m.get("f0_median", 0.0)
-    vr = m.get("voiced_ratio", 0.0)
     gender_raw = m.get("gender", "unclear")
+    p80 = m.get("f0_p80", 0.0)
+    method = m.get("method", "")
+    vr = m.get("voiced_ratio", 0.0)
 
-    demucs_used = m.get("demucs", False)
-
-    # Strict instrumental: HPSS/ZCR says no vocal AND very few voiced frames
+    # Praat pitch analysis on full mix (floor=150Hz suppresses bass instruments)
     if vocal_label == "инструментальный" and vr < 0.10:
-        gender_hint = "instrumental — no vocal signal"
-    elif gender_raw == "instrumental" and vr < 0.03:
-        gender_hint = "instrumental — voiced_ratio near zero"
-    elif demucs_used:
-        # Demucs extracted pure vocal stem — F0 is reliable, use it directly
-        p75 = m.get("f0_p75", f0)
-        if gender_raw == "instrumental":
-            gender_hint = "instrumental — Demucs stem nearly silent"
-        elif gender_raw == "female":
-            gender_hint = f"female vocal — Demucs p75={p75:.0f}Hz (reliable, clean stem)"
+        gender_hint = "instrumental — no vocal signal detected"
+    elif method == "praat":
+        if gender_raw == "female":
+            gender_hint = f"female vocal — Praat p80={p80:.0f}Hz"
         elif gender_raw == "male":
-            gender_hint = f"male vocal — Demucs p75={p75:.0f}Hz (reliable, clean stem)"
+            gender_hint = f"male vocal — Praat p80={p80:.0f}Hz"
         else:
-            gender_hint = (f"vocal present — Demucs p75={p75:.0f}Hz borderline (320-333 Hz zone); "
+            gender_hint = (f"vocal present — Praat p80={p80:.0f}Hz borderline (300-333 Hz); "
                            f"use ARTIST NAME to determine gender")
     else:
-        # Fallback: full mix — F0 unreliable, Claude uses artist name
-        f0_note = f", F0_estimate={f0:.0f}Hz" if f0 > 50 else ""
         strength = "strong" if vocal_label == "вокальный" else "moderate"
-        gender_hint = f"vocal present ({strength} signal, HPSS={vp:.2f}, voiced_ratio={vr:.2f}{f0_note})"
+        gender_hint = f"vocal present ({strength} signal, HPSS={vp:.2f}); use ARTIST NAME for gender"
 
     ctx = (
         f"Audio: BPM={m['bpm']}, key={m['key']}, "
         f"energy={m['energy']:.2f}({energy_label}), "
         f"vocal_hpss={vp:.2f} zcr={zcr:.3f} → {vocal_label}, "
-        f"voice={gender_hint} voiced_ratio={vr:.2f}, "
+        f"voice={gender_hint}, "
         f"danceability={m['danceability']:.2f}"
     )
     if m.get("centroid"):
@@ -875,7 +836,7 @@ RULES:
 - mood: {n_mood} tags that best describe the emotional feel
 - era: 1 tag (decade the track sounds like, not release year)
 - tempo: 1 tag
-- vocal: 1-2 tags — STRICT RULES: (1) "Instrumental" and any gender tag are MUTUALLY EXCLUSIVE. (2) if voice=instrumental* → ["Instrumental"] ONLY. (3) if voice contains "Demucs F0=" → TRUST IT — it is from a clean isolated vocal stem, use the stated gender directly. (4) if voice=vocal present* (no Demucs) → determine gender in PRIORITY ORDER: FIRST your knowledge of the ARTIST NAME (most reliable — you know artists like Jane Air, Ягода, GAFT, Techcrasher, EMMA M etc.); SECOND track title context; THIRD F0_estimate as last resort (>180Hz female, <140Hz male). (5) DEFAULT TO VOCAL — most tracks have singers; only choose Instrumental when voice=instrumental in audio data.
+- vocal: 1-2 tags — STRICT RULES: (1) "Instrumental" and any gender tag are MUTUALLY EXCLUSIVE. (2) if voice=instrumental* → ["Instrumental"] ONLY. (3) if voice contains "Praat p80=" → TRUST the stated gender (female vocal / male vocal). (4) if voice=vocal present* or borderline → determine gender in PRIORITY ORDER: FIRST ARTIST NAME (most reliable — you know Вирус/Краски/Аня/Маруся are female; NILETTO/Ваня Дмитриенко are male); SECOND title context; THIRD p80 hint. (5) DEFAULT TO VOCAL — only use Instrumental when voice=instrumental in audio data.
 - instr: {n_instr} prominent instruments (empty array if unclear)
 - theme: {n_theme} lyric themes (empty array if instrumental or unclear)
 
