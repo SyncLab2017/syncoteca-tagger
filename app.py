@@ -666,41 +666,61 @@ def _yandex_player(url: str):
 
 
 def _correction_form(row: dict, idx: int, results_key: str):
-    """Inline tag correction form. Saves to session_state + Supabase on submit."""
-    with st.form(key=f"corr_{results_key}_{idx}"):
-        g_all = sorted(_tag_labels(list(vocab["genre"].values())))
-        m_all = sorted(_tag_labels(list(vocab["mood"].values())))
-        e_all = _tag_labels(list(vocab["era"].values()))
-        t_all = _tag_labels(list(vocab["tempo"].values()))
-        v_all = sorted(_tag_labels(list(vocab["vocal"].values())))
-        i_all = sorted(_tag_labels(list(vocab["instr"].values())))
-        th_all = sorted(_tag_labels(list(vocab["theme"].values())))
+    """Inline tag correction form with tabs. Saves to session_state + Supabase."""
+    k = f"{results_key}_{idx}"
 
-        new_g  = st.pills("Жанр",         g_all,  default=_tag_labels(row.get("genre",  [])), selection_mode="multi", key=f"cg_{results_key}_{idx}")
-        new_m  = st.pills("Настроение",   m_all,  default=_tag_labels(row.get("mood",   [])), selection_mode="multi", key=f"cm_{results_key}_{idx}")
-        new_e  = st.pills("Эпоха",        e_all,  default=_tag_labels(row.get("era",    [])), selection_mode="multi", key=f"ce_{results_key}_{idx}")
-        new_t  = st.pills("Темп",         t_all,  default=_tag_labels(row.get("tempo",  [])), selection_mode="multi", key=f"ct_{results_key}_{idx}")
-        new_v  = st.pills("Вокал",        v_all,  default=_tag_labels(row.get("vocal",  [])), selection_mode="multi", key=f"cv_{results_key}_{idx}")
-        new_i  = st.pills("Инструменты",  i_all,  default=_tag_labels(row.get("instr",  [])), selection_mode="multi", key=f"ci_{results_key}_{idx}")
-        new_th = st.pills("Темы текста",  th_all, default=_tag_labels(row.get("theme",  [])), selection_mode="multi", key=f"cth_{results_key}_{idx}")
+    g_all  = sorted(_tag_labels(list(vocab["genre"].values())))
+    m_all  = sorted(_tag_labels(list(vocab["mood"].values())))
+    e_all  = _tag_labels(list(vocab["era"].values()))
+    t_all  = _tag_labels(list(vocab["tempo"].values()))
+    v_all  = sorted(_tag_labels(list(vocab["vocal"].values())))
+    i_all  = sorted(_tag_labels(list(vocab["instr"].values())))
+    th_all = sorted(_tag_labels(list(vocab["theme"].values())))
 
-        if st.form_submit_button("💾 Сохранить исправления", type="primary"):
-            corrected = {
-                "genre": _labels_to_tags(new_g,  vocab["genre"]),
-                "mood":  _labels_to_tags(new_m,  vocab["mood"]),
-                "era":   _labels_to_tags(new_e,  vocab["era"]),
-                "tempo": _labels_to_tags(new_t,  vocab["tempo"]),
-                "vocal": _labels_to_tags(new_v,  vocab["vocal"]),
-                "instr": _labels_to_tags(new_i,  vocab["instr"]),
-                "theme": _labels_to_tags(new_th, vocab["theme"]),
-            }
-            st.session_state[results_key][idx].update(corrected)
-            err = save_to_supabase({**st.session_state[results_key][idx], "notes": "corrected"})
-            if err:
-                st.warning(f"Supabase: {err}")
-            else:
-                st.success("Сохранено!")
-            st.rerun()
+    tab_g, tab_m, tab_et, tab_vi, tab_th = st.tabs([
+        "🎸 Жанр", "😊 Настроение", "📅 Эпоха + Темп",
+        "🎤 Вокал + Инструменты", "📝 Темы",
+    ])
+
+    with tab_g:
+        new_g = st.pills("Жанр", g_all, default=_tag_labels(row.get("genre", [])),
+                         selection_mode="multi", key=f"cg_{k}")
+    with tab_m:
+        new_m = st.pills("Настроение", m_all, default=_tag_labels(row.get("mood", [])),
+                         selection_mode="multi", key=f"cm_{k}")
+    with tab_et:
+        new_e = st.pills("Эпоха", e_all, default=_tag_labels(row.get("era", [])),
+                         selection_mode="multi", key=f"ce_{k}")
+        st.divider()
+        new_t = st.pills("Темп", t_all, default=_tag_labels(row.get("tempo", [])),
+                         selection_mode="multi", key=f"ct_{k}")
+    with tab_vi:
+        new_v = st.pills("Вокал", v_all, default=_tag_labels(row.get("vocal", [])),
+                         selection_mode="multi", key=f"cv_{k}")
+        st.divider()
+        new_i = st.pills("Инструменты", i_all, default=_tag_labels(row.get("instr", [])),
+                         selection_mode="multi", key=f"ci_{k}")
+    with tab_th:
+        new_th = st.pills("Темы текста", th_all, default=_tag_labels(row.get("theme", [])),
+                          selection_mode="multi", key=f"cth_{k}")
+
+    if st.button("💾 Сохранить исправления", type="primary", key=f"save_{k}"):
+        corrected = {
+            "genre": _labels_to_tags(st.session_state.get(f"cg_{k}", []),  vocab["genre"]),
+            "mood":  _labels_to_tags(st.session_state.get(f"cm_{k}", []),  vocab["mood"]),
+            "era":   _labels_to_tags(st.session_state.get(f"ce_{k}", []),  vocab["era"]),
+            "tempo": _labels_to_tags(st.session_state.get(f"ct_{k}", []),  vocab["tempo"]),
+            "vocal": _labels_to_tags(st.session_state.get(f"cv_{k}", []),  vocab["vocal"]),
+            "instr": _labels_to_tags(st.session_state.get(f"ci_{k}", []),  vocab["instr"]),
+            "theme": _labels_to_tags(st.session_state.get(f"cth_{k}", []), vocab["theme"]),
+        }
+        st.session_state[results_key][idx].update(corrected)
+        err = save_to_supabase({**st.session_state[results_key][idx], "notes": "corrected"})
+        if err:
+            st.warning(f"Supabase: {err}")
+        else:
+            st.success("Сохранено!")
+        st.rerun()
 
 
 def _render_track_card(row: dict, idx: int = 0, results_key: str = ""):
