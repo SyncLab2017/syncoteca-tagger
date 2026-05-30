@@ -253,38 +253,86 @@ def _hpss_ratio(y: np.ndarray, sr: int, n_fft: int = 2048) -> float:
     return float(np.clip(h_energy / t_energy, 0.0, 1.0))
 
 
+def _estimate_bpm_scipy(y: np.ndarray, sr: int) -> float:
+    """BPM via energy-onset autocorrelation (no essentia required)."""
+    hop = 512
+    n_hops = (len(y) - hop) // hop
+    if n_hops < 8:
+        return 120.0
+    energy = np.array([np.mean(y[i * hop:(i + 1) * hop] ** 2) for i in range(n_hops)])
+    onset = np.maximum(0, np.diff(energy))
+    ac = np.correlate(onset, onset, mode="full")
+    ac = ac[len(ac) // 2:]
+    fps = sr / hop
+    lo = max(1, int(fps * 60 / 200))
+    hi = min(len(ac) - 1, int(fps * 60 / 55))
+    if hi <= lo:
+        return 120.0
+    peak = int(np.argmax(ac[lo:hi + 1])) + lo
+    return float(np.clip(fps * 60.0 / peak, 55.0, 200.0))
+
+
+def _detect_key(y: np.ndarray, sr: int) -> str:
+    """Key via chroma + Krumhansl-Schmuckler profiles (no essentia required)."""
+    chroma = _chroma_from_stft(y, sr)
+    chroma = chroma / (chroma.sum() + 1e-10)
+    maj = _MAJ_PROFILE / _MAJ_PROFILE.sum()
+    min_ = _MIN_PROFILE / _MIN_PROFILE.sum()
+    best_score, best_key, best_mode = -np.inf, "C", "мажор"
+    for i in range(12):
+        rc = np.roll(chroma, -i)
+        for profile, mode in ((maj, "мажор"), (min_, "минор")):
+            score = float(np.corrcoef(rc, profile)[0, 1])
+            if score > best_score:
+                best_score, best_key, best_mode = score, KEYS[i], mode
+    return f"{best_key} {best_mode}"
+
+
 def analyze_audio(file_path: str) -> dict:
     try:
-        if not _ESSENTIA_OK:
-            return {"audio_analyzed": False, "error": "essentia not available"}
+        TARGET_SR = 44100
 
-        loader = MonoLoader(filename=file_path, sampleRate=44100)
-        y = loader()
-        y = y[:44100 * 60]
-        if len(y) < 44100 * 5:
-            return {"error": "слишком короткий файл"}
-
-        rhythm = RhythmExtractor2013(method="multifeature")
-        bpm, ticks, _, _, _ = rhythm(y)
-        bpm = float(bpm)
-
-        if len(ticks) > 4:
-            intervals = np.diff(ticks.astype(float))
-            dance = float(np.clip(1.0 - intervals.std() / (intervals.mean() + 1e-6), 0.0, 1.0))
+        if _ESSENTIA_OK:
+            # Essentia path — high-quality BPM + key
+            loader = MonoLoader(filename=file_path, sampleRate=TARGET_SR)
+            y = loader()
+            y = y[:TARGET_SR * 60]
+            if len(y) < TARGET_SR * 5:
+                return {"error": "слишком короткий файл"}
+            rhythm = RhythmExtractor2013(method="multifeature")
+            bpm, ticks, _, _, _ = rhythm(y)
+            bpm = float(bpm)
+            dance = float(np.clip(
+                1.0 - np.diff(ticks.astype(float)).std() / (np.diff(ticks.astype(float)).mean() + 1e-6),
+                0.0, 1.0,
+            )) if len(ticks) > 4 else 0.5
+            key_ext = KeyExtractor()
+            key_name, scale, _ = key_ext(y)
+            key = f"{key_name} {'мажор' if scale == 'major' else 'минор'}"
         else:
+            # Soundfile + scipy path — works on Streamlit Cloud
+            import soundfile as sf
+            y, sr = sf.read(file_path, always_2d=False)
+            if y.ndim > 1:
+                y = y.mean(axis=1)
+            y = y.astype(np.float32)
+            if sr != TARGET_SR:
+                n_target = int(len(y) * TARGET_SR / sr)
+                y = np.interp(np.linspace(0, len(y) - 1, n_target), np.arange(len(y)), y)
+            y = y[:TARGET_SR * 60]
+            if len(y) < TARGET_SR * 5:
+                return {"error": "слишком короткий файл"}
+            bpm = _estimate_bpm_scipy(y, TARGET_SR)
             dance = 0.5
-
-        key_ext = KeyExtractor()
-        key_name, scale, _ = key_ext(y)
-        mode = "мажор" if scale == "major" else "минор"
+            key = _detect_key(y, TARGET_SR)
 
         rms = float(np.sqrt(np.mean(y ** 2)))
         energy = float(np.clip(rms * 20, 0.0, 1.0))
-        vocal_presence = _hpss_ratio(y, 44100)
+        vocal_presence = _hpss_ratio(y, TARGET_SR)
 
         return {
             "bpm": round(bpm, 1),
-            "key": f"{key_name} {mode}",
+            "key": key,
             "energy": round(energy, 3),
             "vocal_presence": round(vocal_presence, 3),
             "danceability": round(dance, 3),
