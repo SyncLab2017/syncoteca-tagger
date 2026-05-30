@@ -253,8 +253,49 @@ def _hpss_ratio(y: np.ndarray, sr: int, n_fft: int = 2048) -> float:
     return float(np.clip(h_energy / t_energy, 0.0, 1.0))
 
 
-def _estimate_bpm_scipy(y: np.ndarray, sr: int) -> float:
-    """BPM via energy-onset autocorrelation (no essentia required)."""
+def _spectral_features(y: np.ndarray, sr: int) -> dict:
+    """ZCR, spectral centroid, rolloff, 3-band energy (bass/mid/high)."""
+    zcr = float(np.mean(np.abs(np.diff(np.sign(y))) / 2))
+
+    n_fft = 2048
+    hop = n_fft // 4
+    freqs = np.fft.rfftfreq(n_fft, 1.0 / sr)
+    frames = [y[i:i + n_fft] * np.hanning(n_fft) for i in range(0, len(y) - n_fft, hop)]
+
+    if not frames:
+        return {"zcr": round(zcr, 4), "centroid": sr // 4, "rolloff": sr // 4,
+                "bass_energy": 0.33, "mid_energy": 0.33, "high_energy": 0.33}
+
+    mags = np.abs(np.array([np.fft.rfft(f) for f in frames]))
+    mag_sum = mags.sum(axis=1, keepdims=True) + 1e-10
+
+    centroid = float(np.mean((mags * freqs).sum(axis=1) / mag_sum.squeeze()))
+
+    cum = np.cumsum(mags, axis=1)
+    total = cum[:, -1:] + 1e-10
+    rolloff_idx = np.argmax(cum / total >= 0.85, axis=1)
+    rolloff = float(np.mean(freqs[rolloff_idx.clip(0, len(freqs) - 1)]))
+
+    bass_mask = freqs < 250
+    mid_mask = (freqs >= 250) & (freqs < 4000)
+    high_mask = freqs >= 4000
+    total_e = mags.mean() + 1e-10
+
+    return {
+        "zcr": round(zcr, 4),
+        "centroid": int(centroid),
+        "rolloff": int(rolloff),
+        "bass_energy": round(float(mags[:, bass_mask].mean() / total_e), 3),
+        "mid_energy":  round(float(mags[:, mid_mask].mean()  / total_e), 3),
+        "high_energy": round(float(mags[:, high_mask].mean() / total_e), 3),
+    }
+
+
+def _estimate_bpm_scipy(y: np.ndarray, sr: int,
+                        bpm_min: float = 55.0, bpm_max: float = 200.0,
+                        anti_double: float = 140.0) -> float:
+    """BPM via energy-onset autocorrelation. Anti-doubling: if BPM > anti_double,
+    check half-period; if it's strong (>50% of main peak) use half BPM instead."""
     hop = 512
     n_hops = (len(y) - hop) // hop
     if n_hops < 8:
@@ -264,12 +305,19 @@ def _estimate_bpm_scipy(y: np.ndarray, sr: int) -> float:
     ac = np.correlate(onset, onset, mode="full")
     ac = ac[len(ac) // 2:]
     fps = sr / hop
-    lo = max(1, int(fps * 60 / 200))
-    hi = min(len(ac) - 1, int(fps * 60 / 55))
+    lo = max(1, int(fps * 60 / bpm_max))
+    hi = min(len(ac) - 1, int(fps * 60 / bpm_min))
     if hi <= lo:
         return 120.0
     peak = int(np.argmax(ac[lo:hi + 1])) + lo
-    return float(np.clip(fps * 60.0 / peak, 55.0, 200.0))
+    bpm = fps * 60.0 / peak
+    # Anti-doubling: check if half-BPM period is also a strong peak
+    if bpm > anti_double:
+        half_peak = peak * 2
+        if half_peak < len(ac) - 1:
+            if ac[half_peak] / (ac[peak] + 1e-10) > 0.5:
+                bpm = bpm / 2
+    return float(np.clip(bpm, bpm_min, bpm_max))
 
 
 def _detect_key(y: np.ndarray, sr: int) -> str:
@@ -288,12 +336,16 @@ def _detect_key(y: np.ndarray, sr: int) -> str:
     return f"{best_key} {best_mode}"
 
 
-def analyze_audio(file_path: str) -> dict:
+def analyze_audio(file_path: str, tuning: dict | None = None) -> dict:
+    t = tuning or {}
     try:
         TARGET_SR = 44100
+        bpm_min = float(t.get("bpm_min", 55))
+        bpm_max = float(t.get("bpm_max", 200))
+        anti_double = float(t.get("bpm_anti_double", 140))
+        energy_baseline = float(t.get("energy_baseline", 0.3))
 
         if _ESSENTIA_OK:
-            # Essentia path — high-quality BPM + key
             loader = MonoLoader(filename=file_path, sampleRate=TARGET_SR)
             y = loader()
             y = y[:TARGET_SR * 60]
@@ -310,7 +362,6 @@ def analyze_audio(file_path: str) -> dict:
             key_name, scale, _ = key_ext(y)
             key = f"{key_name} {'мажор' if scale == 'major' else 'минор'}"
         else:
-            # Soundfile + scipy path — works on Streamlit Cloud
             import soundfile as sf
             y, sr = sf.read(file_path, always_2d=False)
             if y.ndim > 1:
@@ -322,13 +373,14 @@ def analyze_audio(file_path: str) -> dict:
             y = y[:TARGET_SR * 60]
             if len(y) < TARGET_SR * 5:
                 return {"error": "слишком короткий файл"}
-            bpm = _estimate_bpm_scipy(y, TARGET_SR)
+            bpm = _estimate_bpm_scipy(y, TARGET_SR, bpm_min, bpm_max, anti_double)
             dance = 0.5
             key = _detect_key(y, TARGET_SR)
 
         rms = float(np.sqrt(np.mean(y ** 2)))
-        energy = float(np.clip(rms / 0.3, 0.0, 1.0))  # 0.3 RMS ≈ loud track → 1.0
+        energy = float(np.clip(rms / energy_baseline, 0.0, 1.0))
         vocal_presence = _hpss_ratio(y, TARGET_SR)
+        spec = _spectral_features(y, TARGET_SR)
 
         return {
             "bpm": round(bpm, 1),
@@ -338,6 +390,7 @@ def analyze_audio(file_path: str) -> dict:
             "danceability": round(dance, 3),
             "audio_analyzed": True,
             "error": None,
+            **spec,
         }
     except Exception as e:
         return {"audio_analyzed": False, "error": str(e)}
@@ -398,17 +451,36 @@ Track: "Мария Магдалена" by Филипп Киркоров
 """
 
 
-def _audio_context(m: dict) -> str:
+def _audio_context(m: dict, tuning: dict | None = None) -> str:
     if not m.get("audio_analyzed"):
         return ""
+    t = tuning or {}
     energy_label = "высокая" if m["energy"] > 0.6 else "средняя" if m["energy"] > 0.3 else "низкая"
-    vocal_label = "вокальный" if m["vocal_presence"] > 0.50 else "инструментальный" if m["vocal_presence"] < 0.15 else "смешанный"
-    return (
+
+    vp = m.get("vocal_presence", 0.5)
+    zcr = m.get("zcr", 0.05)
+    vocal_hi  = float(t.get("vocal_hi",       0.50))
+    vocal_lo  = float(t.get("vocal_lo",       0.15))
+    zcr_vocal = float(t.get("zcr_vocal_hi",   0.07))
+    if vp > vocal_hi or (vp > vocal_lo and zcr > zcr_vocal):
+        vocal_label = "вокальный"
+    elif vp < vocal_lo and zcr < zcr_vocal * 0.7:
+        vocal_label = "инструментальный"
+    else:
+        vocal_label = "смешанный/неясно"
+
+    ctx = (
         f"Audio: BPM={m['bpm']}, key={m['key']}, "
         f"energy={m['energy']:.2f}({energy_label}), "
-        f"vocal={m['vocal_presence']:.2f}({vocal_label}), "
+        f"vocal_hpss={vp:.2f} zcr={zcr:.3f} → {vocal_label}, "
         f"danceability={m['danceability']:.2f}"
     )
+    if m.get("centroid"):
+        brightness = "яркий" if m["centroid"] > 3000 else "тёплый" if m["centroid"] < 1500 else "нейтральный"
+        ctx += (f", centroid={m['centroid']}Hz({brightness})"
+                f", bass/mid/high={m.get('bass_energy',0):.2f}/"
+                f"{m.get('mid_energy',0):.2f}/{m.get('high_energy',0):.2f}")
+    return ctx
 
 
 def enrich_with_claude(
@@ -417,19 +489,27 @@ def enrich_with_claude(
     audio_metrics: dict,
     api_key: str,
     vocab: dict,
+    tuning: dict | None = None,
 ) -> dict:
     """Returns {"genre":[{en,ru},...], "mood":[...], "era":[...], "tempo":[...], "vocal":[...], "instr":[...], "theme":[...]}"""
+    t = tuning or {}
     client = anthropic.Anthropic(api_key=api_key)
 
     genre_list  = ", ".join(sorted(vocab["genre"].keys()))
     mood_list   = ", ".join(sorted(vocab["mood"].keys()))
-    era_list    = ", ".join(vocab["era"].keys())  # keep chronological order
+    era_list    = ", ".join(vocab["era"].keys())
     tempo_list  = ", ".join(vocab["tempo"].keys())
     vocal_list  = ", ".join(sorted(vocab["vocal"].keys()))
     instr_list  = ", ".join(sorted(vocab["instr"].keys()))
     theme_list  = ", ".join(sorted(vocab["theme"].keys()))
 
-    audio_ctx = _audio_context(audio_metrics)
+    audio_ctx = _audio_context(audio_metrics, t)
+
+    n_genre = t.get("n_genre", "1-3")
+    n_mood  = t.get("n_mood",  "3-7")
+    n_instr = t.get("n_instr", "2-6")
+    n_theme = t.get("n_theme", "0-3")
+    temperature = float(t.get("claude_temp", 0.2))
 
     prompt = f"""You are a sync music licensing expert tagging tracks for a professional catalog.
 Tag this track using ONLY tags from the vocabulary below.
@@ -448,13 +528,13 @@ instr: {instr_list}
 theme: {theme_list}
 
 RULES:
-- genre: 1-3 tags
-- mood: 3-7 tags that best describe the emotional feel
+- genre: {n_genre} tags
+- mood: {n_mood} tags that best describe the emotional feel
 - era: 1 tag (decade the track sounds like, not release year)
 - tempo: 1 tag
-- vocal: 1-2 tags (use "Instrumental" if no vocals)
-- instr: 2-6 prominent instruments (empty array if unclear)
-- theme: 0-3 lyric themes (empty array if instrumental or unclear)
+- vocal: 1-2 tags — trust the audio vocal signal above; use "Instrumental" ONLY if vocal signal clearly indicates instrumental
+- instr: {n_instr} prominent instruments (empty array if unclear)
+- theme: {n_theme} lyric themes (empty array if instrumental or unclear)
 
 {_FEW_SHOT}
 Now tag this track. Return JSON only:"""
@@ -472,13 +552,14 @@ Now tag this track. Return JSON only:"""
             msg = client.messages.create(
                 model="claude-haiku-4-5-20251001",
                 max_tokens=500,
+                temperature=temperature,
                 messages=[{"role": "user", "content": prompt}],
             )
             raw = msg.content[0].text.strip()
             raw = re.sub(r"^```(?:json)?\s*", "", raw)
             raw = re.sub(r"\s*```$", "", raw)
             parsed = json.loads(raw)
-            return {
+            result = {
                 "genre": _map(parsed.get("genre", []), "genre"),
                 "mood":  _map(parsed.get("mood",  []), "mood"),
                 "era":   _map(parsed.get("era",   []), "era"),
@@ -487,6 +568,9 @@ Now tag this track. Return JSON only:"""
                 "instr": _map(parsed.get("instr", []), "instr"),
                 "theme": _map(parsed.get("theme", []), "theme"),
             }
+            if t.get("debug_claude"):
+                result["_claude_raw"] = raw
+            return result
         except Exception as e:
             err = str(e)
             if "529" in err or "overloaded" in err:
@@ -548,6 +632,7 @@ def process_track(
     api_key: str = "",
     tmp_dir: str = "",
     vocab: dict = None,
+    tuning: dict | None = None,
 ) -> dict:
     row = {
         "title": title or "—",
@@ -587,21 +672,27 @@ def process_track(
             f.write(audio_file.getvalue())
 
     if audio_path and Path(audio_path).exists():
-        metrics = analyze_audio(audio_path)
+        metrics = analyze_audio(audio_path, tuning)
         if not metrics.get("error"):
             row.update({
-                "bpm": metrics["bpm"],
-                "key": metrics["key"],
-                "energy": metrics["energy"],
+                "bpm":            metrics["bpm"],
+                "key":            metrics["key"],
+                "energy":         metrics["energy"],
                 "vocal_presence": metrics["vocal_presence"],
-                "danceability": metrics["danceability"],
+                "danceability":   metrics["danceability"],
+                "zcr":            metrics.get("zcr", ""),
+                "centroid":       metrics.get("centroid", ""),
+                "rolloff":        metrics.get("rolloff", ""),
+                "bass_energy":    metrics.get("bass_energy", ""),
+                "mid_energy":     metrics.get("mid_energy", ""),
+                "high_energy":    metrics.get("high_energy", ""),
                 "audio_analyzed": True,
             })
     else:
         metrics = {"audio_analyzed": False}
 
     if api_key and vocab:
-        tags = enrich_with_claude(row["title"], row["artist"], metrics, api_key, vocab)
+        tags = enrich_with_claude(row["title"], row["artist"], metrics, api_key, vocab, tuning)
         if "error" not in tags:
             row.update(tags)
             row["status"] = "✅"
@@ -742,6 +833,16 @@ def _render_track_card(row: dict, idx: int = 0, results_key: str = ""):
         st.markdown(f"🎹 **Инструменты:** {_tags_text(row.get('instr', []))}")
         st.markdown(f"📝 **Тема:** {_tags_text(row.get('theme', []))}")
 
+    tuning = st.session_state.get("tuning", {})
+    if tuning.get("debug_metrics") and row.get("audio_analyzed"):
+        with st.expander("🔬 Сырые аудио-метрики"):
+            debug_cols = ["bpm", "key", "energy", "vocal_presence", "zcr",
+                          "centroid", "rolloff", "bass_energy", "mid_energy", "high_energy", "danceability"]
+            st.json({k: row.get(k, "—") for k in debug_cols})
+    if tuning.get("debug_claude") and row.get("_claude_raw"):
+        with st.expander("🤖 Ответ Claude (raw JSON)"):
+            st.code(row["_claude_raw"], language="json")
+
     if results_key:
         with st.expander("✏️ Исправить теги"):
             _correction_form(row, idx, results_key)
@@ -811,6 +912,64 @@ with st.sidebar:
     save_to_db = st.checkbox("Сохранять в Supabase", value=True,
                              help="Результаты пишутся в таблицу human_tags с employee='auto'")
     st.divider()
+
+    with st.expander("🎚 Пульт настройки алгоритмов", expanded=False):
+        st.markdown("**BPM**")
+        bpm_min      = st.slider("BPM мин",              40,  100,  55, key="s_bpm_min")
+        bpm_max      = st.slider("BPM макс",             100, 250, 200, key="s_bpm_max")
+        anti_double  = st.slider("Антиудвоение: порог",  80,  200, 140, key="s_anti_double",
+                                 help="Если BPM > порога — проверить, не является ли это удвоением")
+
+        st.divider()
+        st.markdown("**Энергия**")
+        energy_base  = st.slider("RMS-норма (0.3 = громкий трек)", 0.05, 0.80, 0.30,
+                                 step=0.05, key="s_energy_base")
+
+        st.divider()
+        st.markdown("**Вокал (аудио-сигнал)**")
+        vocal_hi     = st.slider("HPSS порог → вокальный",         0.10, 1.00, 0.50,
+                                 step=0.05, key="s_vocal_hi",
+                                 help="Выше этого значения = вокал есть")
+        vocal_lo     = st.slider("HPSS порог → инструментальный",  0.00, 0.50, 0.15,
+                                 step=0.05, key="s_vocal_lo",
+                                 help="Ниже этого значения + низкий ZCR = инструментал")
+        zcr_vocal    = st.slider("ZCR порог вокала",                0.01, 0.20, 0.07,
+                                 step=0.01, key="s_zcr_vocal",
+                                 help="ZCR (zero-crossing rate) речи/вокала обычно 0.04–0.12")
+
+        st.divider()
+        st.markdown("**Claude**")
+        claude_temp  = st.slider("Температура (0=точный, 1=творческий)", 0.0, 1.0, 0.2,
+                                 step=0.1, key="s_claude_temp")
+        n_genre      = st.select_slider("Жанров",      ["1", "1-2", "1-3", "2-4"], value="1-3", key="s_n_genre")
+        n_mood       = st.select_slider("Настроений",  ["2-4", "3-5", "3-7", "4-8"], value="3-7", key="s_n_mood")
+        n_instr      = st.select_slider("Инструментов",["1-3", "2-4", "2-6", "3-8"], value="2-6", key="s_n_instr")
+        n_theme      = st.select_slider("Тем",         ["0", "0-2", "0-3", "1-4"],   value="0-3", key="s_n_theme")
+
+        st.divider()
+        st.markdown("**Отладка**")
+        debug_metrics = st.checkbox("Показать аудио-метрики под треком", key="s_debug_metrics")
+        debug_claude  = st.checkbox("Показать JSON от Claude",           key="s_debug_claude")
+
+    # Write tuning dict into session_state — read by _run_batch + _render_track_card
+    st.session_state["tuning"] = {
+        "bpm_min":        bpm_min,
+        "bpm_max":        bpm_max,
+        "bpm_anti_double": anti_double,
+        "energy_baseline": energy_base,
+        "vocal_hi":       vocal_hi,
+        "vocal_lo":       vocal_lo,
+        "zcr_vocal_hi":   zcr_vocal,
+        "claude_temp":    claude_temp,
+        "n_genre":        n_genre,
+        "n_mood":         n_mood,
+        "n_instr":        n_instr,
+        "n_theme":        n_theme,
+        "debug_metrics":  debug_metrics,
+        "debug_claude":   debug_claude,
+    }
+
+    st.divider()
     st.caption("Форматы аудио: MP3, WAV, FLAC, OGG")
     st.caption("URL: Яндекс.Музыка, SoundCloud, YouTube")
     st.divider()
@@ -822,6 +981,7 @@ tab_url, tab_upload = st.tabs(["🔗 Яндекс.Музыка URL", "📁 За�
 
 def _run_batch(sources: list, audio_files: list = None, fallback_title: str = "", fallback_artist: str = ""):
     """Run tagging for a batch, yield results one by one."""
+    tuning = st.session_state.get("tuning", {})
     results = []
     progress = st.progress(0)
     status_text = st.empty()
@@ -836,6 +996,7 @@ def _run_batch(sources: list, audio_files: list = None, fallback_title: str = ""
                     source=uf.name, audio_file=uf,
                     title=title or uf.name, artist=artist,
                     api_key=api_key, tmp_dir=tmp, vocab=vocab,
+                    tuning=tuning,
                 )
             else:
                 url = item
@@ -845,6 +1006,7 @@ def _run_batch(sources: list, audio_files: list = None, fallback_title: str = ""
                     title=fallback_title,
                     artist=fallback_artist,
                     api_key=api_key, tmp_dir=tmp, vocab=vocab,
+                    tuning=tuning,
                 )
 
             status_text.text(f"Обрабатываю {i+1}/{len(sources)}: {label}...")
