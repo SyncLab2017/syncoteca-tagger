@@ -633,16 +633,22 @@ def _audio_context(m: dict, tuning: dict | None = None) -> str:
     if vocal_label == "инструментальный" or gender == "instrumental" or vr < 0.05:
         gender_hint = "instrumental (no singing detected)"
     elif vocal_label == "вокальный":
-        # Only trust F0 gender when HPSS+ZCR already confirmed vocal presence
+        # Strong signal: HPSS+ZCR confirmed vocal → trust F0 gender fully
         if gender == "female":
             gender_hint = f"female vocal (F0={f0:.0f}Hz)"
         elif gender == "male":
             gender_hint = f"male vocal (F0={f0:.0f}Hz)"
         else:
-            gender_hint = f"vocal gender unclear (F0≈{f0:.0f}Hz)"
+            gender_hint = f"vocal present, gender unclear (F0≈{f0:.0f}Hz)"
     else:
-        # "смешанный/неясно" — don't commit to gender, let Claude use track name/context
-        gender_hint = f"mixed/unclear — may or may not have vocals (F0≈{f0:.0f}Hz)"
+        # "смешанный/неясно" — weak signal; could be harmonic instrument or voice.
+        # Pass F0 as a hint but flag low confidence so Claude uses title/genre too.
+        if gender == "female" and f0 < 280:
+            gender_hint = f"possible female vocal F0={f0:.0f}Hz (uncertain — mixed harmonic signal)"
+        elif gender == "male":
+            gender_hint = f"possible male vocal F0={f0:.0f}Hz (uncertain — mixed harmonic signal)"
+        else:
+            gender_hint = f"unclear — F0={f0:.0f}Hz (harmonic instrument or voice)"
 
     ctx = (
         f"Audio: BPM={m['bpm']}, key={m['key']}, "
@@ -715,7 +721,7 @@ RULES:
 - mood: {n_mood} tags that best describe the emotional feel
 - era: 1 tag (decade the track sounds like, not release year)
 - tempo: 1 tag
-- vocal: 1-2 tags — CRITICAL: "Instrumental" and gender tags (Female vocal/Male vocal) are MUTUALLY EXCLUSIVE; if voice=instrumental*, use ["Instrumental"] ONLY; if voice=female/male, do NOT add "Instrumental"
+- vocal: 1-2 tags — RULES: (1) "Instrumental" and gender tags are MUTUALLY EXCLUSIVE — never combine them. (2) if voice=instrumental* → ["Instrumental"] only. (3) if voice=female/male vocal → use that gender. (4) if voice=possible/uncertain/unclear → use track title+genre as primary signal: Jazz/Lounge/Ambient/Drone titles with no lyric context → ["Instrumental"]; titles suggesting a song with lyrics → pick gender from F0 hint.
 - instr: {n_instr} prominent instruments (empty array if unclear)
 - theme: {n_theme} lyric themes (empty array if instrumental or unclear)
 
