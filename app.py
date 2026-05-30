@@ -624,11 +624,14 @@ def _audio_context(m: dict, tuning: dict | None = None) -> str:
     else:
         vocal_label = "смешанный/неясно"
 
-    # Gender via F0
+    # Gender via F0 — suppress if HPSS/ZCR already classified as instrumental
+    # (saxophone/piano produce voiced frames that fool F0 detector)
     gender = m.get("gender", "unclear")
     f0 = m.get("f0_median", 0.0)
     vr = m.get("voiced_ratio", 0.0)
-    if gender == "female":
+    if vocal_label == "инструментальный":
+        gender_hint = "instrumental (no singing detected)"
+    elif gender == "female":
         gender_hint = f"female vocal (F0={f0:.0f}Hz)"
     elif gender == "male":
         gender_hint = f"male vocal (F0={f0:.0f}Hz)"
@@ -708,7 +711,7 @@ RULES:
 - mood: {n_mood} tags that best describe the emotional feel
 - era: 1 tag (decade the track sounds like, not release year)
 - tempo: 1 tag
-- vocal: 1-2 tags — TRUST the audio voice= signal for gender; use "Instrumental" ONLY if voiced_ratio is very low
+- vocal: 1-2 tags — CRITICAL: "Instrumental" and gender tags (Female vocal/Male vocal) are MUTUALLY EXCLUSIVE; if voice=instrumental*, use ["Instrumental"] ONLY; if voice=female/male, do NOT add "Instrumental"
 - instr: {n_instr} prominent instruments (empty array if unclear)
 - theme: {n_theme} lyric themes (empty array if instrumental or unclear)
 
