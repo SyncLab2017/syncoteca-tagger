@@ -427,8 +427,8 @@ def _detect_key(y: np.ndarray, sr: int) -> str:
 
 def _separate_vocals(file_path: str) -> str | None:
     """Run Demucs to extract vocal stem.
-    Samples 1 × 20s at 40% of track duration → ~20s clip.
-    One Demucs pass on 20s ≈ 25s processing (vs 60s for 3×15s).
+    Samples 2 × 15s at 25% + 60% of track duration, concatenates → 30s clip.
+    One Demucs pass on 30s ≈ 35-40s processing. Better coverage than 1×20s.
     Returns path to vocals.wav or None if demucs unavailable/failed."""
     try:
         script_dir = Path(__file__).parent
@@ -451,19 +451,39 @@ def _separate_vocals(file_path: str) -> str | None:
             duration = 180.0
 
         work_dir = tempfile.mkdtemp(prefix="demucs_")
-        start = max(0.0, duration * 0.40 - 10.0)  # 20s centered at 40%
-        clip = str(Path(work_dir) / "clip.wav")
-        r = subprocess.run(
-            [ffmpeg, "-y", "-i", file_path, "-ss", f"{start:.1f}", "-t", "20",
-             "-ac", "2", "-ar", "44100", clip],
-            capture_output=True, timeout=30,
-        )
-        if r.returncode != 0 or not Path(clip).exists() or Path(clip).stat().st_size < 1000:
+        snippet_files = []
+        for pct in (0.25, 0.60):
+            start = max(0.0, duration * pct - 7.5)
+            out_f = str(Path(work_dir) / f"snip_{int(pct*100)}.wav")
+            r = subprocess.run(
+                [ffmpeg, "-y", "-i", file_path, "-ss", f"{start:.1f}", "-t", "15",
+                 "-ac", "2", "-ar", "44100", out_f],
+                capture_output=True, timeout=30,
+            )
+            if r.returncode == 0 and Path(out_f).exists() and Path(out_f).stat().st_size > 1000:
+                snippet_files.append(out_f)
+
+        if not snippet_files:
             return None
+
+        if len(snippet_files) == 1:
+            input_path = snippet_files[0]
+        else:
+            concat_list = str(Path(work_dir) / "concat.txt")
+            with open(concat_list, "w") as fh:
+                for sf_path in snippet_files:
+                    fh.write(f"file '{sf_path}'\n")
+            combined = str(Path(work_dir) / "clip.wav")
+            r = subprocess.run(
+                [ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", concat_list,
+                 "-c", "copy", combined],
+                capture_output=True, timeout=30,
+            )
+            input_path = combined if r.returncode == 0 else snippet_files[0]
 
         out_dir = str(Path(work_dir) / "stems")
         result = subprocess.run(
-            [python, "-m", "demucs", "--two-stems=vocals", "--out", out_dir, clip],
+            [python, "-m", "demucs", "--two-stems=vocals", "--out", out_dir, input_path],
             capture_output=True, text=True, timeout=300,
         )
         if result.returncode != 0:
@@ -957,7 +977,11 @@ def process_track(
     vocab: dict = None,
     tuning: dict | None = None,
     catalog: list | None = None,
+    status_fn=None,
 ) -> dict:
+    def _step(msg: str):
+        if status_fn:
+            status_fn(msg)
     row = {
         "title": title or "—",
         "artist": artist or "—",
@@ -983,6 +1007,7 @@ def process_track(
     audio_path = None
 
     if source.startswith("http"):
+        _step(f"⬇️ скачиваю: {row['title']}")
         info, audio_path, dl_error = download_from_yandex(source, tmp_dir)
         # yt-dlp result takes priority; manual title/artist used as fallback
         row["title"] = info.get("title") or info.get("track") or title or "—"
@@ -1001,6 +1026,7 @@ def process_track(
             f.write(audio_bytes)
 
     if audio_path and Path(audio_path).exists():
+        _step(f"🎵 анализирую аудио + Demucs: {row['title']}")
         metrics = analyze_audio(audio_path, tuning)
         if not metrics.get("error"):
             row.update({
@@ -1025,6 +1051,7 @@ def process_track(
         metrics = {"audio_analyzed": False}
 
     if api_key and vocab:
+        _step(f"🤖 Claude теги: {row['title']}")
         tags = enrich_with_claude(row["title"], row["artist"], metrics, api_key, vocab, tuning, catalog)
         if "error" not in tags:
             row.update(tags)
@@ -1426,31 +1453,39 @@ def _run_batch(sources: list, audio_files: list = None, fallback_title: str = ""
     status_text = st.empty()
     table_placeholder = st.empty()
 
+    n = len(sources)
     with tempfile.TemporaryDirectory() as tmp:
         for i, item in enumerate(sources):
+            def _status(msg, _i=i, _n=n):
+                status_text.text(f"[{_i+1}/{_n}] {msg}")
+
             if audio_files:
                 uf, title, artist = item
                 label = uf.name
+                _status(f"⏳ начинаю: {title or uf.name}")
                 row = process_track(
                     source=uf.name, audio_file=uf,
                     title=title or uf.name, artist=artist,
                     api_key=api_key, tmp_dir=tmp, vocab=vocab,
                     tuning=tuning, catalog=catalog,
+                    status_fn=_status,
                 )
             else:
                 url = item
                 label = url[:60]
+                _status(f"⏳ начинаю: {url[:60]}")
                 row = process_track(
                     source=url,
                     title=fallback_title,
                     artist=fallback_artist,
                     api_key=api_key, tmp_dir=tmp, vocab=vocab,
                     tuning=tuning, catalog=catalog,
+                    status_fn=_status,
                 )
 
-            status_text.text(f"Обрабатываю {i+1}/{len(sources)}: {label}...")
+            _status(f"✅ готово: {row['title']}")
             results.append(row)
-            progress.progress((i + 1) / len(sources))
+            progress.progress((i + 1) / n)
             table_placeholder.dataframe(_results_to_df(results), use_container_width=True)
 
             if save_to_db and row["status"] == "✅":
