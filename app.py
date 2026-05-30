@@ -255,12 +255,26 @@ def _hpss_ratio(y: np.ndarray, sr: int, n_fft: int = 2048) -> float:
 
 def _detect_vocal_gender(y: np.ndarray, sr: int,
                          f0_female: float = 180.0,
-                         f0_male: float = 140.0) -> dict:
+                         f0_male: float = 140.0,
+                         use_stem_mode: bool = False) -> dict:
     """Estimate vocal gender via F0 autocorrelation on voiced frames.
-    Voiced frames: ZCR in 0.03–0.15 (voice range) AND RMS > 40th-percentile.
-    Returns gender, median F0, and voiced_ratio."""
+
+    use_stem_mode=True: input is a clean Demucs vocal stem.
+      - RMS < 0.005 → instrumental (stem is nearly silent = no real vocal)
+      - Uses p75 of pitches for gender (male singers p75 ≤ 296 Hz, female ≥ 337 Hz)
+      - Threshold: p75 > 315 Hz = female, else male
+
+    use_stem_mode=False (fallback, full mix):
+      - Uses median F0 with f0_female/f0_male thresholds (less reliable)
+    """
+    # Stem mode: first check RMS — nearly silent stem = no vocal in track
+    if use_stem_mode:
+        stem_rms = float(np.sqrt(np.mean(y ** 2)))
+        if stem_rms < 0.005:
+            return {"gender": "instrumental", "f0_median": 0.0, "voiced_ratio": 0.0}
+
     n_fft = 2048
-    hop = n_fft // 4
+    hop = 512
     frames_y = [y[i:i + n_fft] for i in range(0, len(y) - n_fft, hop)]
     if len(frames_y) < 10:
         return {"gender": "unclear", "f0_median": 0.0, "voiced_ratio": 0.0}
@@ -276,7 +290,7 @@ def _detect_vocal_gender(y: np.ndarray, sr: int,
         return {"gender": "instrumental", "f0_median": 0.0, "voiced_ratio": round(voiced_ratio, 3)}
 
     pitches = []
-    for i in np.where(voiced)[0][:200]:
+    for i in np.where(voiced)[0][:500]:
         f = frames_y[i]
         ac = np.correlate(f, f, mode="full")[len(f) - 1:]
         lo = max(1, int(sr / 400))
@@ -288,17 +302,37 @@ def _detect_vocal_gender(y: np.ndarray, sr: int,
     if not pitches:
         return {"gender": "unclear", "f0_median": 0.0, "voiced_ratio": round(voiced_ratio, 3)}
 
-    f0 = float(np.median(pitches))
-    if f0 > f0_female:
+    ps = np.array(pitches)
+    f0_median = float(np.median(ps))
+
+    if use_stem_mode:
+        # p75 threshold calibrated on 9-track dataset:
+        # male max p75 = 332 Hz (Techcrasher rock tenor), female min p75 = 334 Hz (Alive EDM)
+        f0_p75 = float(np.percentile(ps, 75))
+        if f0_p75 > 333.0:
+            gender = "female"
+        elif f0_p75 < 320.0:
+            gender = "male"
+        else:
+            gender = "unclear"  # borderline: let Claude use artist name
+        return {
+            "gender":       gender,
+            "f0_median":    round(f0_median, 1),
+            "f0_p75":       round(f0_p75, 1),
+            "voiced_ratio": round(voiced_ratio, 3),
+        }
+
+    # Fallback (full mix): less reliable median-based detection
+    if f0_median > f0_female:
         gender = "female"
-    elif f0 < f0_male:
+    elif f0_median < f0_male:
         gender = "male"
     else:
         gender = "unclear"
 
     return {
         "gender":       gender,
-        "f0_median":    round(f0, 1),
+        "f0_median":    round(f0_median, 1),
         "voiced_ratio": round(voiced_ratio, 3),
     }
 
@@ -344,8 +378,9 @@ def _spectral_features(y: np.ndarray, sr: int) -> dict:
 def _estimate_bpm_scipy(y: np.ndarray, sr: int,
                         bpm_min: float = 55.0, bpm_max: float = 200.0,
                         anti_double: float = 140.0) -> float:
-    """BPM via energy-onset autocorrelation. Anti-doubling: if BPM > anti_double,
-    check half-period; if it's strong (>50% of main peak) use half BPM instead."""
+    """BPM via energy-onset autocorrelation.
+    Anti-doubling: BPM > anti_double → check half-period; if strong, halve.
+    Anti-halving: BPM < 80 → check double-period; if strong, double."""
     hop = 512
     n_hops = (len(y) - hop) // hop
     if n_hops < 8:
@@ -361,12 +396,16 @@ def _estimate_bpm_scipy(y: np.ndarray, sr: int,
         return 120.0
     peak = int(np.argmax(ac[lo:hi + 1])) + lo
     bpm = fps * 60.0 / peak
-    # Anti-doubling: check if half-BPM period is also a strong peak
+    # Anti-doubling: detected too fast → check if half is equally strong
     if bpm > anti_double:
         half_peak = peak * 2
-        if half_peak < len(ac) - 1:
-            if ac[half_peak] / (ac[peak] + 1e-10) > 0.5:
-                bpm = bpm / 2
+        if half_peak < len(ac) - 1 and ac[half_peak] / (ac[peak] + 1e-10) > 0.5:
+            bpm /= 2
+    # Anti-halving: detected too slow → check if double is equally strong
+    elif bpm < 80.0:
+        double_peak = peak // 2
+        if double_peak >= lo and ac[double_peak] / (ac[peak] + 1e-10) > 0.5:
+            bpm *= 2
     return float(np.clip(bpm, bpm_min, bpm_max))
 
 
@@ -384,6 +423,78 @@ def _detect_key(y: np.ndarray, sr: int) -> str:
             if score > best_score:
                 best_score, best_key, best_mode = score, KEYS[i], mode
     return f"{best_key} {best_mode}"
+
+
+def _separate_vocals(file_path: str) -> str | None:
+    """Run Demucs to extract vocal stem.
+    Samples 3 × 15s at 25/45/65% of track duration, concatenates → ~45s clip.
+    One Demucs pass on 45s ≈ 60s processing vs 3+ min for full track.
+    Returns path to vocals.wav or None if demucs unavailable/failed."""
+    try:
+        script_dir = Path(__file__).parent
+        python = str(script_dir / "venv" / "bin" / "python3")
+        if not Path(python).exists():
+            python = "python3"
+
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            return None
+
+        # Get track duration via ffprobe
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", file_path],
+            capture_output=True, text=True, timeout=15,
+        )
+        try:
+            duration = float(probe.stdout.strip())
+        except (ValueError, AttributeError):
+            duration = 180.0  # fallback: assume 3 minutes
+
+        work_dir = tempfile.mkdtemp(prefix="demucs_")
+        snippet_files = []
+        for pct in (0.25, 0.45, 0.65):
+            start = max(0.0, duration * pct - 7.5)  # centered on sample point
+            end_limit = duration - 1.0
+            if start >= end_limit:
+                continue
+            out_f = str(Path(work_dir) / f"snip_{int(pct*100)}.wav")
+            r = subprocess.run(
+                [ffmpeg, "-y", "-i", file_path, "-ss", f"{start:.1f}", "-t", "15",
+                 "-ac", "2", "-ar", "44100", out_f],
+                capture_output=True, timeout=30,
+            )
+            if r.returncode == 0 and Path(out_f).stat().st_size > 1000:
+                snippet_files.append(out_f)
+
+        if not snippet_files:
+            return None
+
+        # Concatenate snippets into one clip
+        concat_list = str(Path(work_dir) / "concat.txt")
+        with open(concat_list, "w") as fh:
+            for sf_path in snippet_files:
+                fh.write(f"file '{sf_path}'\n")
+        combined = str(Path(work_dir) / "clip.wav")
+        r = subprocess.run(
+            [ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", concat_list,
+             "-c", "copy", combined],
+            capture_output=True, timeout=30,
+        )
+        input_path = combined if r.returncode == 0 else snippet_files[0]
+
+        out_dir = str(Path(work_dir) / "stems")
+        result = subprocess.run(
+            [python, "-m", "demucs", "--two-stems=vocals", "--out", out_dir, input_path],
+            capture_output=True, text=True, timeout=300,
+        )
+        if result.returncode != 0:
+            return None
+        for p in Path(out_dir).rglob("vocals.wav"):
+            return str(p)
+        return None
+    except Exception:
+        return None
 
 
 def analyze_audio(file_path: str, tuning: dict | None = None) -> dict:
@@ -431,11 +542,30 @@ def analyze_audio(file_path: str, tuning: dict | None = None) -> dict:
         energy = float(np.clip(rms / energy_baseline, 0.0, 1.0))
         vocal_presence = _hpss_ratio(y, TARGET_SR)
         spec = _spectral_features(y, TARGET_SR)
-        gender_info = _detect_vocal_gender(
-            y, TARGET_SR,
-            f0_female=float(t.get("f0_female", 180.0)),
-            f0_male=float(t.get("f0_male", 140.0)),
-        )
+
+        # Try Demucs vocal stem for accurate gender detection
+        vocals_path = _separate_vocals(file_path)
+        if vocals_path:
+            y_vocal, sr_vocal = sf.read(vocals_path, always_2d=False)
+            if y_vocal.ndim > 1:
+                y_vocal = y_vocal.mean(axis=1)
+            y_vocal = y_vocal.astype(np.float32)
+            if sr_vocal != TARGET_SR:
+                n_target = int(len(y_vocal) * TARGET_SR / sr_vocal)
+                y_vocal = np.interp(np.linspace(0, len(y_vocal) - 1, n_target), np.arange(len(y_vocal)), y_vocal)
+            gender_info = _detect_vocal_gender(
+                y_vocal, TARGET_SR,
+                use_stem_mode=True,
+            )
+            gender_info["demucs"] = True
+        else:
+            gender_info = _detect_vocal_gender(
+                y, TARGET_SR,
+                f0_female=float(t.get("f0_female", 180.0)),
+                f0_male=float(t.get("f0_male", 140.0)),
+                use_stem_mode=False,
+            )
+            gender_info["demucs"] = False
 
         return {
             "bpm":            round(bpm, 1),
@@ -652,15 +782,27 @@ def _audio_context(m: dict, tuning: dict | None = None) -> str:
     vr = m.get("voiced_ratio", 0.0)
     gender_raw = m.get("gender", "unclear")
 
+    demucs_used = m.get("demucs", False)
+
     # Strict instrumental: HPSS/ZCR says no vocal AND very few voiced frames
     if vocal_label == "инструментальный" and vr < 0.10:
         gender_hint = "instrumental — no vocal signal"
     elif gender_raw == "instrumental" and vr < 0.03:
         gender_hint = "instrumental — voiced_ratio near zero"
+    elif demucs_used:
+        # Demucs extracted pure vocal stem — F0 is reliable, use it directly
+        p75 = m.get("f0_p75", f0)
+        if gender_raw == "instrumental":
+            gender_hint = "instrumental — Demucs stem nearly silent"
+        elif gender_raw == "female":
+            gender_hint = f"female vocal — Demucs p75={p75:.0f}Hz (reliable, clean stem)"
+        elif gender_raw == "male":
+            gender_hint = f"male vocal — Demucs p75={p75:.0f}Hz (reliable, clean stem)"
+        else:
+            gender_hint = (f"vocal present — Demucs p75={p75:.0f}Hz borderline (320-333 Hz zone); "
+                           f"use ARTIST NAME to determine gender")
     else:
-        # Vocal is present (or uncertain) — report audio metrics only.
-        # Claude determines gender from ARTIST NAME, not F0.
-        # F0 provided as last-resort hint for completely unknown artists.
+        # Fallback: full mix — F0 unreliable, Claude uses artist name
         f0_note = f", F0_estimate={f0:.0f}Hz" if f0 > 50 else ""
         strength = "strong" if vocal_label == "вокальный" else "moderate"
         gender_hint = f"vocal present ({strength} signal, HPSS={vp:.2f}, voiced_ratio={vr:.2f}{f0_note})"
@@ -736,7 +878,7 @@ RULES:
 - mood: {n_mood} tags that best describe the emotional feel
 - era: 1 tag (decade the track sounds like, not release year)
 - tempo: 1 tag
-- vocal: 1-2 tags — STRICT RULES: (1) "Instrumental" and any gender tag are MUTUALLY EXCLUSIVE. (2) if voice=instrumental* → ["Instrumental"] ONLY. (3) if voice=vocal present* → determine gender in PRIORITY ORDER: FIRST your knowledge of the ARTIST NAME (most reliable — you know artists like Jane Air, Ягода, GAFT, Techcrasher, EMMA M etc.); SECOND track title context; THIRD F0_estimate as last resort (>180Hz female, <140Hz male). (4) DEFAULT TO VOCAL — most tracks have singers; only choose Instrumental when voice=instrumental in audio data.
+- vocal: 1-2 tags — STRICT RULES: (1) "Instrumental" and any gender tag are MUTUALLY EXCLUSIVE. (2) if voice=instrumental* → ["Instrumental"] ONLY. (3) if voice contains "Demucs F0=" → TRUST IT — it is from a clean isolated vocal stem, use the stated gender directly. (4) if voice=vocal present* (no Demucs) → determine gender in PRIORITY ORDER: FIRST your knowledge of the ARTIST NAME (most reliable — you know artists like Jane Air, Ягода, GAFT, Techcrasher, EMMA M etc.); SECOND track title context; THIRD F0_estimate as last resort (>180Hz female, <140Hz male). (5) DEFAULT TO VOCAL — most tracks have singers; only choose Instrumental when voice=instrumental in audio data.
 - instr: {n_instr} prominent instruments (empty array if unclear)
 - theme: {n_theme} lyric themes (empty array if instrumental or unclear)
 
