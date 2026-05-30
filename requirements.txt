@@ -6,3 +6,4 @@ soundfile>=0.12.0
 anthropic>=0.40.0
 supabase>=2.0.0
 yt-dlp>=2024.1.0
+praat-parselmouth>=0.4.3
