@@ -1004,6 +1004,7 @@ def process_track(
                 "high_energy":    metrics.get("high_energy", ""),
                 "gender":         metrics.get("gender", ""),
                 "f0_median":      metrics.get("f0_median", ""),
+                "f0_p80":         metrics.get("f0_p80", ""),
                 "voiced_ratio":   metrics.get("voiced_ratio", ""),
                 "audio_analyzed": True,
             })
@@ -1148,7 +1149,8 @@ def _render_track_card(row: dict, idx: int = 0, results_key: str = ""):
         gender_str = ""
         if row.get("gender") in ("female", "male"):
             g_ru = "♀ жен." if row["gender"] == "female" else "♂ муж."
-            gender_str = f" · Голос: {g_ru} F0={row.get('f0_median','')}Hz"
+            f0_val = row.get('f0_p80') or row.get('f0_median', '')
+            gender_str = f" · Голос: {g_ru} F0={f0_val}Hz"
         st.caption(f"BPM: {row['bpm']} · {row.get('key', '')} · Энергия: {row.get('energy', '')}{gender_str}")
 
     col1, col2 = st.columns(2)
