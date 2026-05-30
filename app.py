@@ -253,6 +253,56 @@ def _hpss_ratio(y: np.ndarray, sr: int, n_fft: int = 2048) -> float:
     return float(np.clip(h_energy / t_energy, 0.0, 1.0))
 
 
+def _detect_vocal_gender(y: np.ndarray, sr: int,
+                         f0_female: float = 180.0,
+                         f0_male: float = 140.0) -> dict:
+    """Estimate vocal gender via F0 autocorrelation on voiced frames.
+    Voiced frames: ZCR in 0.03–0.15 (voice range) AND RMS > 40th-percentile.
+    Returns gender, median F0, and voiced_ratio."""
+    n_fft = 2048
+    hop = n_fft // 4
+    frames_y = [y[i:i + n_fft] for i in range(0, len(y) - n_fft, hop)]
+    if len(frames_y) < 10:
+        return {"gender": "unclear", "f0_median": 0.0, "voiced_ratio": 0.0}
+
+    zcr_frames = np.array([np.mean(np.abs(np.diff(np.sign(f))) / 2) for f in frames_y])
+    rms_frames = np.array([np.sqrt(np.mean(f ** 2)) for f in frames_y])
+    rms_thresh = float(np.percentile(rms_frames, 40))
+
+    voiced = (zcr_frames > 0.03) & (zcr_frames < 0.15) & (rms_frames > rms_thresh)
+    voiced_ratio = float(voiced.sum() / len(voiced))
+
+    if voiced.sum() < 10:
+        return {"gender": "instrumental", "f0_median": 0.0, "voiced_ratio": round(voiced_ratio, 3)}
+
+    pitches = []
+    for i in np.where(voiced)[0][:200]:
+        f = frames_y[i]
+        ac = np.correlate(f, f, mode="full")[len(f) - 1:]
+        lo = max(1, int(sr / 400))
+        hi = min(len(ac) - 1, int(sr / 80))
+        if hi > lo:
+            p = int(np.argmax(ac[lo:hi + 1])) + lo
+            pitches.append(sr / p)
+
+    if not pitches:
+        return {"gender": "unclear", "f0_median": 0.0, "voiced_ratio": round(voiced_ratio, 3)}
+
+    f0 = float(np.median(pitches))
+    if f0 > f0_female:
+        gender = "female"
+    elif f0 < f0_male:
+        gender = "male"
+    else:
+        gender = "unclear"
+
+    return {
+        "gender":       gender,
+        "f0_median":    round(f0, 1),
+        "voiced_ratio": round(voiced_ratio, 3),
+    }
+
+
 def _spectral_features(y: np.ndarray, sr: int) -> dict:
     """ZCR, spectral centroid, rolloff, 3-band energy (bass/mid/high)."""
     zcr = float(np.mean(np.abs(np.diff(np.sign(y))) / 2))
@@ -381,16 +431,22 @@ def analyze_audio(file_path: str, tuning: dict | None = None) -> dict:
         energy = float(np.clip(rms / energy_baseline, 0.0, 1.0))
         vocal_presence = _hpss_ratio(y, TARGET_SR)
         spec = _spectral_features(y, TARGET_SR)
+        gender_info = _detect_vocal_gender(
+            y, TARGET_SR,
+            f0_female=float(t.get("f0_female", 180.0)),
+            f0_male=float(t.get("f0_male", 140.0)),
+        )
 
         return {
-            "bpm": round(bpm, 1),
-            "key": key,
-            "energy": round(energy, 3),
+            "bpm":            round(bpm, 1),
+            "key":            key,
+            "energy":         round(energy, 3),
             "vocal_presence": round(vocal_presence, 3),
-            "danceability": round(dance, 3),
+            "danceability":   round(dance, 3),
             "audio_analyzed": True,
-            "error": None,
+            "error":          None,
             **spec,
+            **gender_info,
         }
     except Exception as e:
         return {"audio_analyzed": False, "error": str(e)}
@@ -469,10 +525,24 @@ def _audio_context(m: dict, tuning: dict | None = None) -> str:
     else:
         vocal_label = "смешанный/неясно"
 
+    # Gender via F0
+    gender = m.get("gender", "unclear")
+    f0 = m.get("f0_median", 0.0)
+    vr = m.get("voiced_ratio", 0.0)
+    if gender == "female":
+        gender_hint = f"female vocal (F0={f0:.0f}Hz)"
+    elif gender == "male":
+        gender_hint = f"male vocal (F0={f0:.0f}Hz)"
+    elif gender == "instrumental" or vr < 0.05:
+        gender_hint = "instrumental (very few voiced frames)"
+    else:
+        gender_hint = f"vocal gender unclear (F0≈{f0:.0f}Hz)"
+
     ctx = (
         f"Audio: BPM={m['bpm']}, key={m['key']}, "
         f"energy={m['energy']:.2f}({energy_label}), "
         f"vocal_hpss={vp:.2f} zcr={zcr:.3f} → {vocal_label}, "
+        f"voice={gender_hint} voiced_ratio={vr:.2f}, "
         f"danceability={m['danceability']:.2f}"
     )
     if m.get("centroid"):
@@ -532,7 +602,7 @@ RULES:
 - mood: {n_mood} tags that best describe the emotional feel
 - era: 1 tag (decade the track sounds like, not release year)
 - tempo: 1 tag
-- vocal: 1-2 tags — trust the audio vocal signal above; use "Instrumental" ONLY if vocal signal clearly indicates instrumental
+- vocal: 1-2 tags — TRUST the audio voice= signal above for gender (female/male); use "Instrumental" ONLY if voiced_ratio is very low or gender hint says instrumental
 - instr: {n_instr} prominent instruments (empty array if unclear)
 - theme: {n_theme} lyric themes (empty array if instrumental or unclear)
 
@@ -686,6 +756,9 @@ def process_track(
                 "bass_energy":    metrics.get("bass_energy", ""),
                 "mid_energy":     metrics.get("mid_energy", ""),
                 "high_energy":    metrics.get("high_energy", ""),
+                "gender":         metrics.get("gender", ""),
+                "f0_median":      metrics.get("f0_median", ""),
+                "voiced_ratio":   metrics.get("voiced_ratio", ""),
                 "audio_analyzed": True,
             })
     else:
@@ -820,7 +893,11 @@ def _render_track_card(row: dict, idx: int = 0, results_key: str = ""):
 
     st.markdown(f"**{row['title']}** — {row['artist']}")
     if row.get("bpm"):
-        st.caption(f"BPM: {row['bpm']} · {row.get('key', '')} · Энергия: {row.get('energy', '')}")
+        gender_str = ""
+        if row.get("gender") in ("female", "male"):
+            g_ru = "♀ жен." if row["gender"] == "female" else "♂ муж."
+            gender_str = f" · Голос: {g_ru} F0={row.get('f0_median','')}Hz"
+        st.caption(f"BPM: {row['bpm']} · {row.get('key', '')} · Энергия: {row.get('energy', '')}{gender_str}")
 
     col1, col2 = st.columns(2)
     with col1:
@@ -837,6 +914,7 @@ def _render_track_card(row: dict, idx: int = 0, results_key: str = ""):
     if tuning.get("debug_metrics") and row.get("audio_analyzed"):
         with st.expander("🔬 Сырые аудио-метрики"):
             debug_cols = ["bpm", "key", "energy", "vocal_presence", "zcr",
+                          "gender", "f0_median", "voiced_ratio",
                           "centroid", "rolloff", "bass_energy", "mid_energy", "high_energy", "danceability"]
             st.json({k: row.get(k, "—") for k in debug_cols})
     if tuning.get("debug_claude") and row.get("_claude_raw"):
@@ -936,6 +1014,13 @@ with st.sidebar:
         zcr_vocal    = st.slider("ZCR порог вокала",                0.01, 0.20, 0.07,
                                  step=0.01, key="s_zcr_vocal",
                                  help="ZCR (zero-crossing rate) речи/вокала обычно 0.04–0.12")
+        st.markdown("**Определение пола голоса (F0)**")
+        f0_female    = st.slider("F0 порог: женский голос (Гц)",  150, 280, 180,
+                                 key="s_f0_female",
+                                 help="Женский вокал обычно 160–300 Гц; снизь если пропускает сопрано")
+        f0_male      = st.slider("F0 порог: мужской голос (Гц)",   80, 180, 140,
+                                 key="s_f0_male",
+                                 help="Мужской вокал обычно 80–150 Гц; подними если путает баритон с женским")
 
         st.divider()
         st.markdown("**Claude**")
@@ -960,6 +1045,8 @@ with st.sidebar:
         "vocal_hi":       vocal_hi,
         "vocal_lo":       vocal_lo,
         "zcr_vocal_hi":   zcr_vocal,
+        "f0_female":      f0_female,
+        "f0_male":        f0_male,
         "claude_temp":    claude_temp,
         "n_genre":        n_genre,
         "n_mood":         n_mood,
