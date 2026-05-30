@@ -548,14 +548,21 @@ def _load_catalog_examples() -> list[dict]:
         return _FALLBACK_EXAMPLES
 
 
-def _select_examples(audio_metrics: dict, catalog: list[dict], n: int = 5) -> list[dict]:
-    """Pick n catalog examples relevant to this track's audio profile."""
+def _select_examples(audio_metrics: dict, catalog: list[dict], n: int = 5,
+                     artist: str = "") -> list[dict]:
+    """Pick n catalog examples relevant to this track's audio profile.
+
+    Priority order:
+    1. Same artist (artist-specific learning — same artist → similar tags)
+    2. Same vocal gender + tempo bucket
+    3. Same vocal gender
+    4. Anything else
+    """
     import random
     if len(catalog) <= n:
         return catalog
 
     gender = audio_metrics.get("gender", "unclear")
-    energy = audio_metrics.get("energy", 0.5)
     tempo_label = ("Fast" if audio_metrics.get("bpm", 0) > 130
                    else "Slow" if audio_metrics.get("bpm", 0) < 80
                    else "Midtempo")
@@ -563,26 +570,36 @@ def _select_examples(audio_metrics: dict, catalog: list[dict], n: int = 5) -> li
     def vocal_en(ex):
         return (ex.get("vocal") or [""])[0]
 
-    # Primary filter: same vocal gender
+    # Tier 0: same artist (case-insensitive, up to 2 slots reserved)
+    artist_clean = (artist or "").strip().lower()
+    artist_examples = []
+    if artist_clean and artist_clean not in ("—", "-", ""):
+        artist_examples = [e for e in catalog
+                           if (e.get("artist") or "").strip().lower() == artist_clean]
+    artist_slots = min(2, len(artist_examples))
+    artist_picks = artist_examples[:artist_slots]
+    artist_keys  = {(e["title"], e["artist"]) for e in artist_picks}
+
+    # Remaining slots from gender/tempo matching (exclude artist picks)
+    remaining_n = n - artist_slots
+    rest_catalog = [e for e in catalog if (e["title"], e["artist"]) not in artist_keys]
+
     target_vocal = ("Female vocal" if gender == "female"
                     else "Male vocal" if gender == "male"
                     else "Instrumental" if gender == "instrumental"
                     else None)
 
     if target_vocal:
-        matching   = [e for e in catalog if vocal_en(e) == target_vocal]
-        other      = [e for e in catalog if vocal_en(e) != target_vocal]
+        matching = [e for e in rest_catalog if vocal_en(e) == target_vocal]
+        other    = [e for e in rest_catalog if vocal_en(e) != target_vocal]
     else:
-        matching   = catalog
-        other      = []
+        matching = rest_catalog
+        other    = []
 
-    # Secondary: same tempo bucket
     tempo_match = [e for e in matching if tempo_label in (e.get("tempo") or [])]
     tempo_other = [e for e in matching if tempo_label not in (e.get("tempo") or [])]
 
-    # Build pool: prefer tempo+vocal match, then vocal match, then anything
     pool = tempo_match + tempo_other + other
-    # Deduplicate keeping order
     seen, deduped = set(), []
     for e in pool:
         key = (e["title"], e["artist"])
@@ -590,18 +607,22 @@ def _select_examples(audio_metrics: dict, catalog: list[dict], n: int = 5) -> li
             seen.add(key)
             deduped.append(e)
 
-    # Take first (n-1) best matches + 1 random from the rest for variety
-    best = deduped[:n - 1]
-    rest = deduped[n - 1:]
-    extra = [random.choice(rest)] if rest else []
-    return best + extra
+    best  = deduped[:max(0, remaining_n - 1)]
+    rest2 = deduped[max(0, remaining_n - 1):]
+    extra = [random.choice(rest2)] if rest2 else []
+
+    return artist_picks + best + extra
 
 
-def _format_examples(examples: list[dict]) -> str:
+def _format_examples(examples: list[dict], target_artist: str = "") -> str:
     lines = ["EXAMPLES FROM OUR CATALOG — match this tagging style exactly:"]
+    artist_clean = (target_artist or "").strip().lower()
     for ex in examples:
         tag = {cat: ex.get(cat, []) for cat in ("genre","mood","era","tempo","vocal","instr","theme")}
-        lines.append(f'\nTrack: "{ex["title"]}" by {ex["artist"]}')
+        ex_artist = (ex.get("artist") or "").strip()
+        same = (artist_clean and ex_artist.lower() == artist_clean)
+        label = " ⭐ SAME ARTIST — highest priority" if same else ""
+        lines.append(f'\nTrack: "{ex["title"]}" by {ex_artist}{label}')
         lines.append(json.dumps(tag, ensure_ascii=False))
     return "\n".join(lines)
 
@@ -698,8 +719,8 @@ def enrich_with_claude(
 
     # Dynamic few-shot from catalog
     cat = catalog_examples or _FALLBACK_EXAMPLES
-    selected = _select_examples(audio_metrics, cat, n=n_examples)
-    few_shot_block = _format_examples(selected)
+    selected = _select_examples(audio_metrics, cat, n=n_examples, artist=artist)
+    few_shot_block = _format_examples(selected, target_artist=artist)
 
     prompt = f"""You are a sync music licensing expert tagging tracks for a professional catalog.
 Tag this track using ONLY tags from the vocabulary below.
