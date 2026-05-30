@@ -427,8 +427,8 @@ def _detect_key(y: np.ndarray, sr: int) -> str:
 
 def _separate_vocals(file_path: str) -> str | None:
     """Run Demucs to extract vocal stem.
-    Samples 3 × 15s at 25/45/65% of track duration, concatenates → ~45s clip.
-    One Demucs pass on 45s ≈ 60s processing vs 3+ min for full track.
+    Samples 1 × 20s at 40% of track duration → ~20s clip.
+    One Demucs pass on 20s ≈ 25s processing (vs 60s for 3×15s).
     Returns path to vocals.wav or None if demucs unavailable/failed."""
     try:
         script_dir = Path(__file__).parent
@@ -440,7 +440,6 @@ def _separate_vocals(file_path: str) -> str | None:
         if not ffmpeg:
             return None
 
-        # Get track duration via ffprobe
         probe = subprocess.run(
             ["ffprobe", "-v", "error", "-show_entries", "format=duration",
              "-of", "default=noprint_wrappers=1:nokey=1", file_path],
@@ -449,43 +448,22 @@ def _separate_vocals(file_path: str) -> str | None:
         try:
             duration = float(probe.stdout.strip())
         except (ValueError, AttributeError):
-            duration = 180.0  # fallback: assume 3 minutes
+            duration = 180.0
 
         work_dir = tempfile.mkdtemp(prefix="demucs_")
-        snippet_files = []
-        for pct in (0.25, 0.45, 0.65):
-            start = max(0.0, duration * pct - 7.5)  # centered on sample point
-            end_limit = duration - 1.0
-            if start >= end_limit:
-                continue
-            out_f = str(Path(work_dir) / f"snip_{int(pct*100)}.wav")
-            r = subprocess.run(
-                [ffmpeg, "-y", "-i", file_path, "-ss", f"{start:.1f}", "-t", "15",
-                 "-ac", "2", "-ar", "44100", out_f],
-                capture_output=True, timeout=30,
-            )
-            if r.returncode == 0 and Path(out_f).stat().st_size > 1000:
-                snippet_files.append(out_f)
-
-        if not snippet_files:
-            return None
-
-        # Concatenate snippets into one clip
-        concat_list = str(Path(work_dir) / "concat.txt")
-        with open(concat_list, "w") as fh:
-            for sf_path in snippet_files:
-                fh.write(f"file '{sf_path}'\n")
-        combined = str(Path(work_dir) / "clip.wav")
+        start = max(0.0, duration * 0.40 - 10.0)  # 20s centered at 40%
+        clip = str(Path(work_dir) / "clip.wav")
         r = subprocess.run(
-            [ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", concat_list,
-             "-c", "copy", combined],
+            [ffmpeg, "-y", "-i", file_path, "-ss", f"{start:.1f}", "-t", "20",
+             "-ac", "2", "-ar", "44100", clip],
             capture_output=True, timeout=30,
         )
-        input_path = combined if r.returncode == 0 else snippet_files[0]
+        if r.returncode != 0 or not Path(clip).exists() or Path(clip).stat().st_size < 1000:
+            return None
 
         out_dir = str(Path(work_dir) / "stems")
         result = subprocess.run(
-            [python, "-m", "demucs", "--two-stems=vocals", "--out", out_dir, input_path],
+            [python, "-m", "demucs", "--two-stems=vocals", "--out", out_dir, clip],
             capture_output=True, text=True, timeout=300,
         )
         if result.returncode != 0:
