@@ -645,32 +645,25 @@ def _audio_context(m: dict, tuning: dict | None = None) -> str:
     else:
         vocal_label = "смешанный/неясно"
 
-    # Gender via F0 — only trust when HPSS/ZCR already confirmed "вокальный".
-    # Harmonic instruments (saxophone, piano) produce voiced frames in female F0
-    # range → reporting gender for "смешанный" tracks causes false Female vocal tags.
-    gender = m.get("gender", "unclear")
+    # Vocal presence: HPSS+ZCR determines if vocal EXISTS; F0 is a weak fallback.
+    # F0 detection on mixed audio is unreliable for gender (synths/instruments
+    # produce pitch in vocal range). Gender must come from Claude's artist knowledge.
     f0 = m.get("f0_median", 0.0)
     vr = m.get("voiced_ratio", 0.0)
-    if vocal_label == "инструментальный" or gender == "instrumental" or vr < 0.05:
-        gender_hint = "instrumental (no singing detected)"
-    elif vocal_label == "вокальный":
-        # Strong signal: HPSS+ZCR confirmed vocal → trust F0 gender fully
-        if gender == "female":
-            gender_hint = f"female vocal (F0={f0:.0f}Hz)"
-        elif gender == "male":
-            gender_hint = f"male vocal (F0={f0:.0f}Hz)"
-        else:
-            gender_hint = f"vocal present, gender unclear (F0≈{f0:.0f}Hz)"
+    gender_raw = m.get("gender", "unclear")
+
+    # Strict instrumental: HPSS/ZCR says no vocal AND very few voiced frames
+    if vocal_label == "инструментальный" and vr < 0.10:
+        gender_hint = "instrumental — no vocal signal"
+    elif gender_raw == "instrumental" and vr < 0.03:
+        gender_hint = "instrumental — voiced_ratio near zero"
     else:
-        # "смешанный/неясно" — F0 autocorrelation found vocal-range pitch.
-        # Report gender directly; F0 >280Hz flagged as possible instrument.
-        if gender == "female" and f0 < 280:
-            gender_hint = f"female vocal F0={f0:.0f}Hz (mixed signal)"
-        elif gender == "male":
-            gender_hint = f"male vocal F0={f0:.0f}Hz (mixed signal)"
-        else:
-            # F0 >280Hz is saxophone/high-instrument range — don't commit to gender
-            gender_hint = f"unclear — F0={f0:.0f}Hz (likely harmonic instrument, not voice)"
+        # Vocal is present (or uncertain) — report audio metrics only.
+        # Claude determines gender from ARTIST NAME, not F0.
+        # F0 provided as last-resort hint for completely unknown artists.
+        f0_note = f", F0_estimate={f0:.0f}Hz" if f0 > 50 else ""
+        strength = "strong" if vocal_label == "вокальный" else "moderate"
+        gender_hint = f"vocal present ({strength} signal, HPSS={vp:.2f}, voiced_ratio={vr:.2f}{f0_note})"
 
     ctx = (
         f"Audio: BPM={m['bpm']}, key={m['key']}, "
@@ -743,7 +736,7 @@ RULES:
 - mood: {n_mood} tags that best describe the emotional feel
 - era: 1 tag (decade the track sounds like, not release year)
 - tempo: 1 tag
-- vocal: 1-2 tags — RULES: (1) "Instrumental" and gender tags are MUTUALLY EXCLUSIVE — never combine them. (2) if voice=instrumental* → ["Instrumental"] only. (3) if voice=female vocal* OR male vocal* (even with "mixed signal") → use that gender tag — the F0 detector found real vocal-range pitch. (4) if voice=unclear* or "likely harmonic instrument" → ["Instrumental"]. DEFAULT TO VOCAL when F0 signal is present — most tracks have singers.
+- vocal: 1-2 tags — STRICT RULES: (1) "Instrumental" and any gender tag are MUTUALLY EXCLUSIVE. (2) if voice=instrumental* → ["Instrumental"] ONLY. (3) if voice=vocal present* → determine gender in PRIORITY ORDER: FIRST your knowledge of the ARTIST NAME (most reliable — you know artists like Jane Air, Ягода, GAFT, Techcrasher, EMMA M etc.); SECOND track title context; THIRD F0_estimate as last resort (>180Hz female, <140Hz male). (4) DEFAULT TO VOCAL — most tracks have singers; only choose Instrumental when voice=instrumental in audio data.
 - instr: {n_instr} prominent instruments (empty array if unclear)
 - theme: {n_theme} lyric themes (empty array if instrumental or unclear)
 
