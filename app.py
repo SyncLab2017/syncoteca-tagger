@@ -624,21 +624,25 @@ def _audio_context(m: dict, tuning: dict | None = None) -> str:
     else:
         vocal_label = "смешанный/неясно"
 
-    # Gender via F0 — suppress if HPSS/ZCR already classified as instrumental
-    # (saxophone/piano produce voiced frames that fool F0 detector)
+    # Gender via F0 — only trust when HPSS/ZCR already confirmed "вокальный".
+    # Harmonic instruments (saxophone, piano) produce voiced frames in female F0
+    # range → reporting gender for "смешанный" tracks causes false Female vocal tags.
     gender = m.get("gender", "unclear")
     f0 = m.get("f0_median", 0.0)
     vr = m.get("voiced_ratio", 0.0)
-    if vocal_label == "инструментальный":
+    if vocal_label == "инструментальный" or gender == "instrumental" or vr < 0.05:
         gender_hint = "instrumental (no singing detected)"
-    elif gender == "female":
-        gender_hint = f"female vocal (F0={f0:.0f}Hz)"
-    elif gender == "male":
-        gender_hint = f"male vocal (F0={f0:.0f}Hz)"
-    elif gender == "instrumental" or vr < 0.05:
-        gender_hint = "instrumental (very few voiced frames)"
+    elif vocal_label == "вокальный":
+        # Only trust F0 gender when HPSS+ZCR already confirmed vocal presence
+        if gender == "female":
+            gender_hint = f"female vocal (F0={f0:.0f}Hz)"
+        elif gender == "male":
+            gender_hint = f"male vocal (F0={f0:.0f}Hz)"
+        else:
+            gender_hint = f"vocal gender unclear (F0≈{f0:.0f}Hz)"
     else:
-        gender_hint = f"vocal gender unclear (F0≈{f0:.0f}Hz)"
+        # "смешанный/неясно" — don't commit to gender, let Claude use track name/context
+        gender_hint = f"mixed/unclear — may or may not have vocals (F0≈{f0:.0f}Hz)"
 
     ctx = (
         f"Audio: BPM={m['bpm']}, key={m['key']}, "
