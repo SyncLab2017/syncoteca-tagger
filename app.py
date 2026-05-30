@@ -501,7 +501,6 @@ def analyze_audio(file_path: str, tuning: dict | None = None) -> dict:
             key_name, scale, _ = key_ext(y)
             key = f"{key_name} {'мажор' if scale == 'major' else 'минор'}"
         else:
-            import soundfile as sf
             y, sr = sf.read(file_path, always_2d=False)
             if y.ndim > 1:
                 y = y.mean(axis=1)
